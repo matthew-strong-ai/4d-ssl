@@ -1,6 +1,7 @@
 checkpoints/
 .gradio/
 dino/
+vision/
 
 # My stuff
 runs/
