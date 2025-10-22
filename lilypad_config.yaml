@@ -1,0 +1,28 @@
+name: matt-youtube-autoregressive-pi3-lebron-james-freeze-decoder-seg-motion
+
+workload_variant_config:
+  training_fn: train_cluster.train_model
+  training_fn_config: 
+    epochs: 1
+    mode: "cluster"
+
+  experiment_tracker:
+    wandb:
+      entity: research-interns
+      project: matt_strong_cuda
+
+cluster_resources:
+  gpu_machine_type: a100.40.8
+  num_gpus: 16  # Direct GPU count
+  customer_resource: "research"  # Required field
+
+runtime_environment:
+  setup_timeout_seconds: 1800
+  code_assets:
+      root_directory: "."
+      regex_excludes: ["checkpoints/", "StreamVGGT", "croco/", ".git/", "GroundingDINO/", "wandb/", "joynext_test/"]
+      max_file_size_mb: 200
+      pip_requirements_path: "requirements.txt"
+  required_environment_variables: ["WANDB_API_KEY", "AWS_REQUEST_CHECKSUM_CALCULATION", "AWS_RESPONSE_CHECKSUM_VALIDATION"]
+  constant_environment_variables:
+    ENV: "production"
