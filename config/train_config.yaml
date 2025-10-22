@@ -1,0 +1,52 @@
+# Training configuration for Pi3 cluster training
+
+# Dataset parameters
+DATASET:
+  ROOT_DIR: "/path/to/your/data"  # Root directory containing subfolders of images
+  BATCH_SIZE: 1                   # Batch size for training (typically 1 for Pi3)
+  VAL_SPLIT: 0.1                 # Fraction of data to use for validation
+
+# Model parameters  
+MODEL:
+  M: 3                           # Number of input frames
+  N: 3                           # Number of target frames
+  GRID_SIZE: 10                  # Grid size for query points
+
+# Training parameters
+TRAINING:
+  NUM_EPOCHS: 5                  # Number of training epochs
+  LEARNING_RATE: 5e-5           # Learning rate
+  WARMUP_STEPS: 500             # Number of warmup steps for learning rate scheduler
+  WARMUP_START_FACTOR: 0.1      # Starting factor for warmup (lr will start at lr * warmup_start_factor)
+  GRAD_ACCUM_STEPS: 4           # Number of gradient accumulation steps (effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS)
+  MAX_GRAD_NORM: 1.0            # Max gradient norm for clipping
+
+# Loss weights
+LOSS:
+  PC_LOSS_WEIGHT: 0.1           # Point cloud loss weight
+  POSE_LOSS_WEIGHT: 0.9         # Camera pose loss weight
+  CONF_LOSS_WEIGHT: 0.5         # Confidence loss weight
+  FUTURE_FRAME_WEIGHT: 2.0      # Weight multiplier for future frame supervision (>1.0 emphasizes future frames)
+
+# Validation parameters
+VALIDATION:
+  VAL_FREQ: 1000                # Validate every N steps
+  VAL_SAMPLES: 50               # Number of validation samples to use (-1 for all)
+  EARLY_STOPPING_PATIENCE: 10  # Early stopping patience (number of validation checks without improvement)
+
+# Logging parameters
+LOGGING:
+  LOG_FREQ: 50                  # Log every N steps
+  SAVE_FREQ: 1000               # Check for best model every N steps
+  N_VISUALIZE: 3                # Number of random batches to visualize before training
+
+# Output parameters
+OUTPUT:
+  CHECKPOINT_DIR: "checkpoints"  # Directory to save checkpoints
+  SAVE_NPZ: False               # Save npz files  
+  SAVE_DEPTHS: True             # Save depths files (every 200 steps)
+
+# W&B parameters
+WANDB:
+  PROJECT: "pi3-cluster-training" # Weights & Biases project name
+  USE_WANDB: True               # Enable Weights & Biases logging

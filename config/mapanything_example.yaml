@@ -1,0 +1,59 @@
+# Example configuration for MapAnything model
+# Copy this to config.yaml and modify as needed
+
+MODEL:
+  ARCHITECTURE: "MapAnything"  # Use MapAnything instead of Pi3
+  M: 3                        # Number of input frames
+  N: 3                        # Number of target frames
+  
+  # MapAnything specific parameters
+  MAPANYTHING:
+    BACKBONE: "dinov3"         # Backbone architecture
+    DECODER_DIM: 512           # Decoder dimension
+    NUM_LAYERS: 6              # Number of decoder layers
+    USE_TEMPORAL: True         # Enable temporal processing
+    TEMPORAL_WINDOW: 3         # Temporal window size
+    
+    # HuggingFace and model loading configuration
+    HF_MODEL_NAME: "facebook/map-anything"   # HuggingFace model name
+    CONFIG_PATH: "/home/matthew_strong/Desktop/autonomy-wild/map-anything/configs/train.yaml"        # Path to MapAnything config
+    CHECKPOINT_NAME: "model.safetensors"     # Checkpoint file name
+    CONFIG_NAME: "config.json"               # Config file name
+    MACHINE: "aws"                           # Machine type for config overrides
+    TASK: "images_only"                      # Task type
+    USE_TORCH_HUB: False                     # Whether encoder uses torch hub
+    TRAINED_WITH_AMP: True                   # Whether trained with AMP
+    AMP_DTYPE: "bf16"                        # AMP data type
+    DATA_NORM_TYPE: "dinov2"                 # Data normalization type
+    PATCH_SIZE: 14                           # Patch size
+    RESOLUTION: 518                          # Input resolution
+
+# Loss weights (same as Pi3 for now)
+LOSS:
+  PC_LOSS_WEIGHT: 0.1
+  POSE_LOSS_WEIGHT: 0.9
+  CONF_LOSS_WEIGHT: 0.5
+  SEGMENTATION_LOSS_WEIGHT: 0.1
+  MOTION_LOSS_WEIGHT: 0.1
+
+# Training parameters
+TRAINING:
+  NUM_EPOCHS: 5
+  LEARNING_RATE: 1e-5
+  BATCH_SIZE: 20
+
+# Dataset
+DATASET:
+  USE_S3: True
+  S3_BUCKET: "your-bucket"
+  S3_SEQUENCE_PREFIXES: ["sequences/drive1", "sequences/drive2"]
+
+# Output
+OUTPUT:
+  SAVE_SEGMENTATION: True
+  SAVE_DEPTHS: True
+
+# Logging
+WANDB:
+  PROJECT: "mapanything-training"
+  USE_WANDB: True

@@ -1,0 +1,46 @@
+# Hyperparameter search configuration for Ray Tune
+# This shows example ranges that Ray Tune can search over
+
+DATASET:
+  ROOT_DIR: "/path/to/your/data"
+  BATCH_SIZE: 1
+  VAL_SPLIT: 0.1
+
+MODEL:
+  M: 3
+  N: 3
+  GRID_SIZE: 10
+
+TRAINING:
+  NUM_EPOCHS: 10
+  # Ray Tune will search these parameters
+  LEARNING_RATE: 1e-4          # Can be overridden by tune.loguniform(1e-6, 1e-3)
+  WARMUP_STEPS: 1000
+  WARMUP_START_FACTOR: 0.1     # Can be searched with tune.uniform(0.05, 0.2)
+  GRAD_ACCUM_STEPS: 4
+  MAX_GRAD_NORM: 1.0
+
+LOSS:
+  PC_LOSS_WEIGHT: 0.1          # Can be searched with tune.uniform(0.05, 0.5)
+  POSE_LOSS_WEIGHT: 0.9        # Can be searched with tune.uniform(0.7, 1.0)
+  CONF_LOSS_WEIGHT: 0.5        # Can be searched with tune.uniform(0.1, 1.0)
+  FUTURE_FRAME_WEIGHT: 2.0     # Can be searched with tune.uniform(1.0, 4.0)
+
+VALIDATION:
+  VAL_FREQ: 500
+  VAL_SAMPLES: 25
+  EARLY_STOPPING_PATIENCE: 5
+
+LOGGING:
+  LOG_FREQ: 25
+  SAVE_FREQ: 500
+  N_VISUALIZE: 1
+
+OUTPUT:
+  CHECKPOINT_DIR: "ray_tune_checkpoints"
+  SAVE_NPZ: False
+  SAVE_DEPTHS: False
+
+WANDB:
+  PROJECT: "pi3-hyperparameter-search"
+  USE_WANDB: True
