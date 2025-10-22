@@ -1,0 +1,49 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.3.0 
+
+# Core ML/DL packages
+numpy>=1.21.0
+
+# PyTorch with CUDA 12.1 support
+
+# Training utilities
+accelerate>=0.27.0
+tensorboard>=2.10.0
+tqdm>=4.64.0
+wandb>=0.16.0
+
+# Computer vision & geometry
+opencv-python>=4.5.0
+pillow>=8.0.0
+
+# Visualization & I/O
+matplotlib>=3.5.0
+imageio>=2.20.0
+
+# HuggingFace ecosystem
+transformers>=4.20.0
+huggingface-hub>=0.15.0
+
+# Optional but commonly needed
+scipy>=1.9.0
+scikit-learn>=1.1.0
+
+# 3D utilities
+utils3d
+
+# Additional ML packages
+torch-ema>=0.3.0
+timm>=0.9.0
+
+# Configuration management
+yacs>=0.1.8
+
+# Data storage and streaming
+boto3>=1.28.0,<1.36.0
+lance>=0.10.0
+
+# Video processing
+torchcodec
+
+git+https://github.com/facebookresearch/co-tracker.git
+-e git+https://github.com/IDEA-Research/Grounded-SAM-2.git#egg=SAM-2
