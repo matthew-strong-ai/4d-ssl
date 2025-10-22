@@ -1,0 +1,3 @@
+[submodule "Pi3"]
+	path = Pi3
+	url = git@github.com:matthew-strong-ai/Pi3.git
