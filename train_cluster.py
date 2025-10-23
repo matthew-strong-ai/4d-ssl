@@ -460,17 +460,6 @@ def train_model(train_config=None, experiment_tracker=None):
     else:
         print(f"📊 Train DataLoader created: {len(train_dataloader)} batches of size {cfg.DATASET.BATCH_SIZE}")
 
-    # download grounding dino weights
-    if cfg.DETECTION.USE_GROUNDING_DINO:
-        gdino_local_path = "gdino/groundingdino_swint_ogc.pth"
-
-        print(f"📥 Downloading Grounding DINO checkpoint...")
-        download_success = download_from_s3_uri(
-            "s3://research-datasets/gdino_autonomy/groundingdino_swint_ogc.pth",
-            gdino_local_path,
-            create_dirs=True,
-            overwrite=False
-        )
 
     # download sam2 checkpoint
     sam2_local_path = "Grounded-SAM-2/models/sam2.1_hiera_large.pt"
@@ -501,30 +490,6 @@ def train_model(train_config=None, experiment_tracker=None):
     frozen_model = frozen_model.to(accelerator.device)
     frozen_model.requires_grad_(False)  # freeze parameters
 
-    # Load GroundingDINO model (optional)
-    grounding_dino_model = None
-    if cfg.DETECTION.USE_GROUNDING_DINO:
-        if not _GDINO_AVAILABLE:
-            raise ImportError("GroundingDINO not available. Install with: pip install groundingdino")
-        
-        if not cfg.DETECTION.GDINO_CONFIG_PATH or not cfg.DETECTION.GDINO_WEIGHTS_PATH:
-            raise ValueError("GroundingDINO requires GDINO_CONFIG_PATH and GDINO_WEIGHTS_PATH in config")
-        
-        print(f"🔍 Loading GroundingDINO model...")
-        print(f"   Config: {cfg.DETECTION.GDINO_CONFIG_PATH}")
-        print(f"   Weights: {cfg.DETECTION.GDINO_WEIGHTS_PATH}")
-        
-        try:
-            grounding_dino_model = gdino_load_model(
-                cfg.DETECTION.GDINO_CONFIG_PATH, 
-                cfg.DETECTION.GDINO_WEIGHTS_PATH
-            )
-            print("✅ GroundingDINO model loaded successfully")
-        except Exception as e:
-            print(f"❌ Failed to load GroundingDINO model: {e}")
-            raise
-    else:
-        print("🔍 GroundingDINO disabled in config")
 
 
     # Validate model configuration
@@ -834,16 +799,17 @@ def train_model(train_config=None, experiment_tracker=None):
             disable=not accelerator.is_local_main_process
         )
         for step, batch in enumerate(progress_bar):
+            # Periodic memory cleanup to prevent gradual memory increase
+            if step % 100 == 0:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                
             with accelerator.accumulate(train_model):
-                if step % 500 == 0:
-                    print("Step", step)
 
                 # Process batch properly for any batch size
                 X = batch[0]  # (B, m, C, H, W) - current frames
                 y = batch[1]  # (B, n, C, H, W) - future frames
                 X_all = torch.cat([X, y], dim=1)  # (B, T, C, H, W) where T = m + n
-                
-                # save_batch_images_to_png(X_all, global_step, cfg)
                 
                 # Create unaugmented tensor for frozen model (ground truth)
                 batch_size = X_all.shape[0]
@@ -903,42 +869,27 @@ def train_model(train_config=None, experiment_tracker=None):
                     with torch.amp.autocast('cuda', dtype=dtype):
                         pseudo_gt = frozen_model(video_tensor_unaugmented_14)  # Use unaugmented data for ground truth
                 
-                # Save pseudo_gt for first 100 steps
-                if global_step < 100 and accelerator.is_main_process:
-                    pseudo_gt_storage['step'].append(global_step)
-                    pseudo_gt_storage['point_maps'].append(pseudo_gt['points'].cpu().detach())
-                    pseudo_gt_storage['camera_poses'].append(pseudo_gt['camera_poses'].cpu().detach())
-                    pseudo_gt_storage['confidence'].append(pseudo_gt['conf'].cpu().detach())
-                    pseudo_gt_storage['local_point_maps'].append(pseudo_gt['local_points'].cpu().detach())
+                # if global_step < 100 and accelerator.is_main_process:
+                #     pseudo_gt_storage['step'].append(global_step)
+                #     pseudo_gt_storage['point_maps'].append(pseudo_gt['points'].cpu().detach())
+                #     pseudo_gt_storage['camera_poses'].append(pseudo_gt['camera_poses'].cpu().detach())
+                #     pseudo_gt_storage['confidence'].append(pseudo_gt['conf'].cpu().detach())
+                #     pseudo_gt_storage['local_point_maps'].append(pseudo_gt['local_points'].cpu().detach())
                     
-                    # Save original images
-                    pseudo_gt_storage['images_original'].append(X_all.cpu().detach())  # (B, T, C, H, W)
+                #     # Save original images
+                #     pseudo_gt_storage['images_original'].append(X_all.cpu().detach())  # (B, T, C, H, W)
                     
-                    # Save every 10 steps to avoid losing data
-                    if (global_step + 1) % 10 == 0 or global_step == 99:
-                        print(f"💾 Saving pseudo_gt data at step {global_step}...")
-                        torch.save(pseudo_gt_storage, pseudo_gt_save_path)
+                #     # Save every 10 steps to avoid losing data
+                #     if (global_step + 1) % 10 == 0 or global_step == 99:
+                #         print(f"💾 Saving pseudo_gt data at step {global_step}...")
+                #         torch.save(pseudo_gt_storage, pseudo_gt_save_path)
                     
                 torch.cuda.empty_cache()
 
                 # run inference on the training model - handle both Pi3 and MapAnything
                 with torch.amp.autocast('cuda', dtype=dtype):
-                    if cfg.MODEL.ARCHITECTURE.lower() == 'mapanything':
-                        # MapAnything expects different input format
-                        # Reshape from (B, T, C, H, W) to (B*T, C, H, W)
-                        B, T, C, H, W = subset_video_tensor.shape
-                        mapanything_input = subset_video_tensor.reshape(B*T, C, H, W)
-                        
-                        # MapAnything forward pass
-                        mapanything_output = train_model(mapanything_input)
-                        
-                        # Convert MapAnything output to Pi3-like format for compatibility
-                        predictions = convert_mapanything_to_pi3_format(
-                            mapanything_output, B, T, H, W, cfg
-                        )
-                    else:
-                        # Pi3 forward pass (original)
-                        predictions = train_model(subset_video_tensor)
+                    # Pi3 forward pass (original)
+                    predictions = train_model(subset_video_tensor)
                         
                 # Align prediction and pseudo_gt shapes before loss computation
                 predictions, pseudo_gt = align_prediction_shapes(predictions, pseudo_gt)
@@ -948,128 +899,125 @@ def train_model(train_config=None, experiment_tracker=None):
                 motion_maps = None
                 segmentation_masks = None
                 if cfg.MODEL.USE_SEGMENTATION_HEAD or cfg.POINT_MOTION.TRAIN_MOTION:
-                    try:
-                        # Convert predictions to numpy for processing
-                        point_maps = pseudo_gt['points'].cpu().numpy()  # (B, T, H, W, 3)
-                        rgb_frames = [video_tensor_unaugmented_14[0, t].permute(1, 2, 0).cpu().numpy() for t in range(X_all.shape[1])]
-                        # Denormalize RGB frames to [0, 255]
-                        rgb_frames = [(frame * 255).astype(np.uint8) for frame in rgb_frames]
-                        # Run GSAM2 for object segmentation
+                    # Convert predictions to numpy for processing
+                    point_maps = pseudo_gt['points'].cpu().numpy()  # (B, T, H, W, 3)
+                    rgb_frames = [video_tensor_unaugmented_14[0, t].permute(1, 2, 0).cpu().numpy() for t in range(X_all.shape[1])]
+                    # Denormalize RGB frames to [0, 255]
+                    rgb_frames = [(frame * 255).astype(np.uint8) for frame in rgb_frames]
+                    # Run GSAM2 for object segmentation
+                    with torch.no_grad():
+                        results = gsam2.process_frames(rgb_frames, "car. vehicle. person. road sign. traffic light", verbose=False)
+                        
+                    # Create class-aware composite masks for all frames
+                    H, W = point_maps.shape[2:4]
+                    composite_masks = []
+                    
+                    # Define class mapping from GSAM2 labels to unique values
+                    class_mapping = {
+                        'car': 1,           # All vehicles -> class 1
+                        'vehicle': 1,       # All vehicles -> class 1  
+                        'truck': 1,         # All vehicles -> class 1
+                        'bus': 1,           # All vehicles -> class 1
+                        'motorcycle': 1,    # All vehicles -> class 1
+                        'bicycle': 2,       # Bicycle -> class 2
+                        'person': 3,        # Person -> class 3
+                        'road sign': 4,     # Road signs -> class 4
+                        'traffic light': 5, # Traffic lights -> class 5
+                        'default': 0        # Background/unrecognized -> class 0
+                    }
+                    
+                    for t in range(results['num_frames']):
+                        frame_masks = results['masks'][t]
+                        frame_composite_mask = np.zeros((H, W), dtype=np.uint8)
+                        
+                        for obj_idx, obj_key in enumerate(frame_masks.keys()):
+                            # Get the label for this object
+                            if obj_idx < len(results['labels']):
+                                label = results['labels'][obj_idx].lower().strip()
+                                # Map label to class value - try full label first
+                                class_value = class_mapping.get(label, None)
+                                if class_value is None:
+                                    # Try first word only as fallback
+                                    first_word = label.split(' ')[0].strip()
+                                    class_value = class_mapping.get(first_word, class_mapping['default'])
+                            else:
+                                class_value = class_mapping['default']
+                            
+                            segm_mask = frame_masks[obj_key].astype(bool)  # Convert to boolean mask
+                            if segm_mask.ndim == 3:
+                                segm_mask = segm_mask[0]  # Remove first dimension if present
+                            
+                            # Assign class value to this object's pixels
+                            frame_composite_mask[segm_mask] = class_value
+                            
+                        composite_masks.append(frame_composite_mask)
+                    
+                    # Run CoTracker for point tracking with binary mask
+                    frames = torch.tensor(np.array(rgb_frames)).permute(0, 3, 1, 2)[None].float().to(device)
+                    
+                    # Create motion masks that EXCLUDE static objects (road signs and traffic lights)
+                    # Only include moving objects: vehicles (1), bicycles (2), and persons (3)
+                    moving_object_classes = [1, 2, 3]  # Exclude 4 (road sign) and 5 (traffic light)
+                    motion_masks = []
+                    for mask in composite_masks:
+                        # Create binary mask only for moving objects
+                        motion_mask = np.zeros_like(mask, dtype=np.uint8)
+                        for class_val in moving_object_classes:
+                            motion_mask[mask == class_val] = 1
+                        motion_masks.append(motion_mask)
+                    
+                    # Use motion mask for CoTracker (only moving objects)
+                    binary_mask = motion_masks[0]
+                    binary_composite_masks = motion_masks
+                    
+                    if cfg.POINT_MOTION.TRAIN_MOTION:
                         with torch.no_grad():
-                            results = gsam2.process_frames(rgb_frames, "car. vehicle. person. road sign. traffic light", verbose=False)
-                            
-                        # Create class-aware composite masks for all frames
-                        H, W = point_maps.shape[2:4]
-                        composite_masks = []
-                        
-                        # Define class mapping from GSAM2 labels to unique values
-                        class_mapping = {
-                            'car': 1,           # All vehicles -> class 1
-                            'vehicle': 1,       # All vehicles -> class 1  
-                            'truck': 1,         # All vehicles -> class 1
-                            'bus': 1,           # All vehicles -> class 1
-                            'motorcycle': 1,    # All vehicles -> class 1
-                            'bicycle': 2,       # Bicycle -> class 2
-                            'person': 3,        # Person -> class 3
-                            'road sign': 4,     # Road signs -> class 4
-                            'traffic light': 5, # Traffic lights -> class 5
-                            'default': 0        # Background/unrecognized -> class 0
-                        }
-                        
-                        print(f"📋 GSAM2 detected labels: {results['labels']}")
-                        for t in range(results['num_frames']):
-                            frame_masks = results['masks'][t]
-                            frame_composite_mask = np.zeros((H, W), dtype=np.uint8)
-                            
-                            for obj_idx, obj_key in enumerate(frame_masks.keys()):
-                                # Get the label for this object
-                                if obj_idx < len(results['labels']):
-                                    label = results['labels'][obj_idx].lower().strip()
-                                    # Map label to class value - try full label first
-                                    class_value = class_mapping.get(label, None)
-                                    if class_value is None:
-                                        # Try first word only as fallback
-                                        first_word = label.split(' ')[0].strip()
-                                        class_value = class_mapping.get(first_word, class_mapping['default'])
-                                else:
-                                    class_value = class_mapping['default']
-                                
-                                segm_mask = frame_masks[obj_key].astype(bool)  # Convert to boolean mask
-                                if segm_mask.ndim == 3:
-                                    segm_mask = segm_mask[0]  # Remove first dimension if present
-                                
-                                # Assign class value to this object's pixels
-                                frame_composite_mask[segm_mask] = class_value
-                                
-                            composite_masks.append(frame_composite_mask)
-                        
-                        print(f"🎨 Created class-aware masks with unique values: {np.unique(np.concatenate([mask.flatten() for mask in composite_masks]))}")
-                        
-                        # Run CoTracker for point tracking with binary mask
-                        frames = torch.tensor(np.array(rgb_frames)).permute(0, 3, 1, 2)[None].float().to(device)
-                        
-                        # Create motion masks that EXCLUDE static objects (road signs and traffic lights)
-                        # Only include moving objects: vehicles (1), bicycles (2), and persons (3)
-                        moving_object_classes = [1, 2, 3]  # Exclude 4 (road sign) and 5 (traffic light)
-                        motion_masks = []
-                        for mask in composite_masks:
-                            # Create binary mask only for moving objects
-                            motion_mask = np.zeros_like(mask, dtype=np.uint8)
-                            for class_val in moving_object_classes:
-                                motion_mask[mask == class_val] = 1
-                            motion_masks.append(motion_mask)
-                        
-                        # Use motion mask for CoTracker (only moving objects)
-                        binary_mask = motion_masks[0]
-                        binary_composite_masks = motion_masks
-                        
-                        print(f"🚗 Motion tracking: Only tracking moving objects (vehicles, bicycles, persons)")
-                        print(f"   Excluded static objects: road signs, traffic lights")
+                            # Reduce grid_size and disable backward tracking to save memory
+                            pred_tracks, pred_visibility = cotracker(frames, grid_size=80, 
+                                                            segm_mask=torch.from_numpy(binary_mask)[None, None], 
+                                                            backward_tracking=True)
+                            # Immediately move to CPU to free GPU memory
+                            pred_tracks = pred_tracks.cpu()
+                            pred_visibility = pred_visibility.cpu()
+                            torch.cuda.empty_cache()
 
-                        if cfg.POINT_MOTION.TRAIN_MOTION:
-                            print(f"🎯 CoTracker binary mask: {binary_mask.min()}-{binary_mask.max()}, unique values: {np.unique(binary_mask)}")
-                            with torch.no_grad():
-                                pred_tracks, pred_visibility = cotracker(frames, grid_size=80, 
-                                                                segm_mask=torch.from_numpy(binary_mask)[None, None], 
-                                                                backward_tracking=True)
-                            # Generate motion maps and segmentation masks
-                            # Convert class-aware masks to binary masks for analyze_object_dynamics
-                            print(f"🔍 Binary masks for analysis: {len(binary_composite_masks)} frames, values: {np.unique(binary_composite_masks[0])}")
+                        # Generate motion maps and segmentation masks
+                        # Convert class-aware masks to binary masks for analyze_object_dynamics
+                        # print(f"🔍 Binary masks for analysis: {len(binary_composite_masks)} frames, values: {np.unique(binary_composite_masks[0])}")
+                        try:
                             _, motion_maps, dynamic_masks = analyze_object_dynamics(results, pred_tracks, pred_visibility, 
                                                                 point_maps[0], binary_composite_masks, verbose=False)
-                        
-                            # add motion maps to pseudo_gt
-                            if motion_maps is not None:
-                                motion_tensor = torch.from_numpy(np.array(motion_maps)).float().to(device)  # (T, H, W, 3)
-                                pseudo_gt['motion'] = motion_tensor.unsqueeze(0)  # Add batch dimension: (1, T, H, W, 3)
+                        except Exception as e:
+                            print(f"⚠️ analyze_object_dynamics failed: {e}")
+                            print(f"   Shapes - pred_tracks: {pred_tracks.shape}, point_maps: {point_maps[0].shape}")
+                            motion_maps = None
+                            dynamic_masks = None
+                    
+                        # add motion maps to pseudo_gt
+                        if motion_maps is not None:
+                            motion_tensor = torch.from_numpy(np.array(motion_maps)).float().to(device)  # (T, H, W, 3)
+                            pseudo_gt['motion'] = motion_tensor.unsqueeze(0)  # Add batch dimension: (1, T, H, W, 3)
 
-                        # Stack segmentation masks to (T, H, W, 1)
-                        segmentation_masks = np.stack(composite_masks, axis=0)
-                        segmentation_masks = np.expand_dims(segmentation_masks, axis=-1)
+                    # Stack segmentation masks to (T, H, W, 1)
+                    segmentation_masks = np.stack(composite_masks, axis=0)
+                    segmentation_masks = np.expand_dims(segmentation_masks, axis=-1)
+                    
+                    # Save GSAM2 masks and motion maps for first 100 steps
+                    # if global_step < 100 and accelerator.is_main_process:
+                        #     pseudo_gt_storage['gsam2_composite_masks'].append(np.array(composite_masks))
+                        #     # if motion_maps is not None:
+                        #     #     pseudo_gt_storage['gsam2_motion_maps'].append(np.array(motion_maps))
+                        #     pseudo_gt_storage['gsam2_labels'].append(results['labels'])
+                        #     # Also save dynamic masks if available
+                        #     if 'dynamic_masks' in locals() and dynamic_masks is not None:
+                        #         print("💥 Saving GSAM2 dynamic masks for first 100 steps")
+                        #         # dynamic_masks shape: [T, H, W] with 0=static, 1=dynamic
+                        #         # Stack to match other mask format
+                        #         dynamic_masks_array = np.array(dynamic_masks)
+                        #         if 'gsam2_dynamic_masks' not in pseudo_gt_storage:
+                        #             pseudo_gt_storage['gsam2_dynamic_masks'] = []
+                        #         pseudo_gt_storage['gsam2_dynamic_masks'].append(dynamic_masks_array)
                         
-                        # Save GSAM2 masks and motion maps for first 100 steps
-                        if global_step < 100 and accelerator.is_main_process:
-                            pseudo_gt_storage['gsam2_composite_masks'].append(np.array(composite_masks))
-                            # if motion_maps is not None:
-                            #     pseudo_gt_storage['gsam2_motion_maps'].append(np.array(motion_maps))
-                            pseudo_gt_storage['gsam2_labels'].append(results['labels'])
-                            # Also save dynamic masks if available
-                            if 'dynamic_masks' in locals() and dynamic_masks is not None:
-                                print("💥 Saving GSAM2 dynamic masks for first 100 steps")
-                                # dynamic_masks shape: [T, H, W] with 0=static, 1=dynamic
-                                # Stack to match other mask format
-                                dynamic_masks_array = np.array(dynamic_masks)
-                                if 'gsam2_dynamic_masks' not in pseudo_gt_storage:
-                                    pseudo_gt_storage['gsam2_dynamic_masks'] = []
-                                pseudo_gt_storage['gsam2_dynamic_masks'].append(dynamic_masks_array)
-                        
-                    except Exception as e:
-                        print(f"⚠️ Motion map construction failed: {e}")
-                        motion_maps = None
-                        segmentation_masks = None
-                        # lets continue training even if motion map construction fails
-                        continue
-
                 # Add segmentation masks to pseudo_gt if available
                 if segmentation_masks is not None:
                     # Convert segmentation masks to tensor and add to pseudo_gt
@@ -1077,9 +1025,6 @@ def train_model(train_config=None, experiment_tracker=None):
                     segmentation_tensor = torch.from_numpy(segmentation_masks).float().to(device)  # (T, H, W, 1)
                     pseudo_gt['segmentation'] = segmentation_tensor.unsqueeze(0)  # Add batch dimension: (1, T, H, W, 1)
                 
-                # === GROUNDING DINO INFERENCE FOR DETECTION SUPERVISION ===
-                
-                gdino_detection_results = []
                 
                 # compute loss between prediction and pseudo_gt with optional confidence weighting
                 # Use FP32 for loss computation if enabled for better numerical stability
@@ -1100,30 +1045,10 @@ def train_model(train_config=None, experiment_tracker=None):
                             segformer=segformer, images=video_tensor_unaugmented_14
                         )
                 
-                # Check for NaNs in individual loss components (only if detection is enabled)
-                nan_detected = False
                 pi3_loss = (cfg.LOSS.PC_LOSS_WEIGHT * point_map_loss) + (cfg.LOSS.POSE_LOSS_WEIGHT * camera_pose_loss) + (cfg.LOSS.CONF_LOSS_WEIGHT * conf_loss) + (cfg.LOSS.NORMAL_LOSS_WEIGHT * normal_loss) + (cfg.LOSS.SEGMENTATION_LOSS_WEIGHT * segmentation_loss) + (cfg.LOSS.MOTION_LOSS_WEIGHT * motion_loss) + (cfg.LOSS.FROZEN_DECODER_SUPERVISION_WEIGHT * frozen_decoder_loss)
-                
-                # Print segmentation loss details if segmentation head is enabled
-                if cfg.MODEL.USE_SEGMENTATION_HEAD and global_step % cfg.LOGGING.LOG_FREQ == 0 and accelerator.is_main_process:
-                    seg_loss_val = segmentation_loss.item() if torch.is_tensor(segmentation_loss) else segmentation_loss
-                    weighted_seg_loss = (cfg.LOSS.SEGMENTATION_LOSS_WEIGHT * seg_loss_val)
-                    print(f"🎯 Segmentation Loss Details [Step {global_step}]:")
-                    print(f"   Raw segmentation loss: {seg_loss_val:.6f}")
-                    print(f"   Weighted segmentation loss: {weighted_seg_loss:.6f} (weight: {cfg.LOSS.SEGMENTATION_LOSS_WEIGHT})")
-                    if 'segmentation' in predictions:
-                        pred_seg = predictions['segmentation']
-                        if hasattr(pred_seg, 'shape'):
-                            print(f"   Prediction shape: {pred_seg.shape}")
-                    if 'segmentation' in pseudo_gt:
-                        gt_seg = pseudo_gt['segmentation']
-                        if hasattr(gt_seg, 'shape'):
-                            print(f"   Ground truth shape: {gt_seg.shape}")
-                
                 accelerator.backward(pi3_loss)
                 
                 if accelerator.sync_gradients:
-                    # Check for NaN gradients before clipping (only if detection enabled)
                     if cfg.TRAINING.DETECT_NANS and check_model_parameters(train_model, "train_model", global_step):
                         print(f"🚨 NaN gradients detected at step {global_step}! Skipping optimizer step...")
                         optimizer.zero_grad()  # Clear gradients and continue
@@ -1143,8 +1068,7 @@ def train_model(train_config=None, experiment_tracker=None):
                 torch.cuda.empty_cache()
             
             # Sync all processes after memory cleanup (outside conditional to avoid deadlock)
-
-            if cfg.OUTPUT.SAVE_DEPTHS and 'local_points' in predictions and global_step % 100 == 0 and accelerator.is_main_process:
+            if cfg.OUTPUT.SAVE_DEPTHS and 'local_points' in predictions and global_step % 200 == 0 and accelerator.is_main_process:
                 # Convert tensors to numpy
                 points = pseudo_gt["local_points"]
                 masks = torch.sigmoid(pseudo_gt["conf"][..., 0]) > 0.1
@@ -1171,7 +1095,10 @@ def train_model(train_config=None, experiment_tracker=None):
 
                 
                 # === GSAM2 INFERENCE ===
-                if cfg.MODEL.USE_SEGMENTATION_HEAD and cfg.POINT_MOTION.TRAIN_MOTION and  epoch == 0:  # Only run once for efficiency
+                # Limit visualizations to first 1000 steps to prevent memory accumulation
+                # Only run GSAM2 on main process to avoid multi-GPU deadlocks
+                if (cfg.MODEL.USE_SEGMENTATION_HEAD and cfg.POINT_MOTION.TRAIN_MOTION and 
+                    epoch == 0 and global_step < 1000 and accelerator.is_main_process):
                     B, T, C, H, W = video_tensor_unaugmented_14.shape
                     rgb_frames = []
                     for t in range(min(T, 8)):
@@ -1237,7 +1164,13 @@ def train_model(train_config=None, experiment_tracker=None):
                         print(f"🔍 Binary masks for analysis: {len(binary_composite_masks)} frames, values: {np.unique(binary_composite_masks[0])}")
 
                         if cfg.POINT_MOTION.TRAIN_MOTION:
-                            dynamic_analysis, motion_maps, dynamic_masks = analyze_object_dynamics(results, pred_tracks, pred_visibility, point_maps, binary_composite_masks, verbose=True)
+                            try:
+                                dynamic_analysis, motion_maps, dynamic_masks = analyze_object_dynamics(results, pred_tracks, pred_visibility, point_maps, binary_composite_masks, verbose=True)
+                            except Exception as e:
+                                print(f"⚠️ analyze_object_dynamics visualization failed: {e}")
+                                dynamic_analysis = {}
+                                motion_maps = []
+                                dynamic_masks = []
                         
                             # Log motion map statistics
                             if len(motion_maps) > 0:
@@ -1251,27 +1184,29 @@ def train_model(train_config=None, experiment_tracker=None):
                             
                             # Visualize dynamic objects
                             visualize_dynamic_objects(rgb_frames, results, dynamic_analysis, point_maps, step, run)
-                        
-                        # Visualize results
-                        # if results['num_objects'] > 0:
-                        #     annotated_frames = gsam2.visualize_results(rgb_frames, results)
                             
-                        #     # Save local images
-                        #     for t, frame in enumerate(annotated_frames):
-                        #         img_path = f"gsam2_frame_{step}_{t:02d}.png"
-                        #         cv2.imwrite(img_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                        #     print(f"💾 Saved {len(annotated_frames)} GSAM2 images")
-                            
-                        #     # Log to WandB
-                        #     if cfg.WANDB.USE_WANDB and run is not None:
-                        #         gsam2_images = []
-                        #         for t, frame in enumerate(annotated_frames):
-                        #             gsam2_images.append(wandb.Image(frame, caption=f"GSAM2 Frame {t}"))
-                        #         run.log({"gsam2/segmentations": gsam2_images}, step=global_step)
-                        #         print(f"🎭 Logged {len(gsam2_images)} GSAM2 visualizations to WandB")
+                        # Clean up visualization memory
+                        del rgb_frames
+                        del frames
+                        if 'pred_tracks' in locals():
+                            del pred_tracks
+                        if 'pred_visibility' in locals():
+                            del pred_visibility
+                        if 'results' in locals():
+                            del results
+                        if 'composite_masks' in locals():
+                            del composite_masks
+                        if 'motion_maps' in locals():
+                            del motion_maps
+                        if 'dynamic_masks' in locals():
+                            del dynamic_masks
+                        torch.cuda.empty_cache()
                         
                     except Exception as e:
                         print(f"⚠️ GSAM2 failed: {e}")
+                
+                # Synchronize all processes after GSAM2 inference
+                accelerator.wait_for_everyone()
 
                 # === RGB INPUT FRAMES VISUALIZATION ===
                 rgb_images_for_wandb = []
@@ -1283,77 +1218,6 @@ def train_model(train_config=None, experiment_tracker=None):
                         img = np.transpose(img, (1, 2, 0))  # (H, W, C)
                         img = np.clip(img * 255, 0, 255).astype(np.uint8)  # Scale to [0, 255]
                         rgb_images_for_wandb.append(wandb.Image(img, caption=f"Train Frame {t}"))
-
-                # === GROUNDING DINO INFERENCE ===
-                gdino_detection_results = []
-
-                if grounding_dino_model is not None and cfg.DETECTION.USE_GROUNDING_DINO:
-                    try:
-                        # Run inference on first few frames using UNAUGMENTED images
-                        B, T, C, H, W = X_all.shape  # Use X_all (unaugmented) instead of X_all_augmented
-                        for t in range(min(T, 8)):  # Run on first 3 frames to save compute
-                            # Get unaugmented image tensor for better detection accuracy
-                            img_tensor = X_all[0, t]  # (C, H, W) - unaugmented original image
-                            
-                            # Apply ImageNet normalization to the image tensor for GroundingDINO
-                            gdino_normalize = Tr.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-                            img_tensor_normalized = gdino_normalize(img_tensor)
-                            
-                            # gdino_predict expects tensor, so we can use it directly
-                            boxes, logits, phrases = gdino_predict(
-                                grounding_dino_model,
-                                img_tensor_normalized,  # Pass normalized tensor
-                                caption=cfg.DETECTION.TEXT_PROMPT,
-                                box_threshold=cfg.DETECTION.BOX_THRESHOLD,
-                                text_threshold=cfg.DETECTION.TEXT_THRESHOLD,
-                            )
-                            
-                            # Store results
-                            gdino_detection_results.append({
-                                'frame': t,
-                                'boxes': boxes.cpu().numpy() if boxes.numel() > 0 else [],
-                                'logits': logits.cpu().numpy() if logits.numel() > 0 else [],
-                                'phrases': phrases,
-                                'num_detections': len(boxes)
-                            })
-                            
-                            # Create visualization with bounding boxes if detections found
-                            if len(boxes) > 0:
-                                # Convert tensor to numpy for visualization
-                                img_np = img_tensor.cpu().numpy()  # (C, H, W)
-                                img_np = np.transpose(img_np, (1, 2, 0))  # (H, W, C)
-                                img_np = np.clip(img_np * 255, 0, 255).astype(np.uint8)
-                                
-                                # Use GroundingDINO's annotate function
-                                annotated_img = gdino_annotate(
-                                    image_source=img_np,
-                                    boxes=boxes,
-                                    logits=logits,
-                                    phrases=phrases
-                                )
-                                
-                                # Save visualization to disk
-                                detection_filename = f"gdino_detections_step_frame_{t}.png"
-                                success = cv2.imwrite(detection_filename, annotated_img)
-                                if success:
-                                    print(f"💾 Saved GroundingDINO detection visualization: {detection_filename}")
-                                else:
-                                    print(f"❌ Failed to save detection visualization: {detection_filename}")
-                        
-                        # Log detection summary
-                        total_detections = sum([r['num_detections'] for r in gdino_detection_results])
-                        if total_detections > 0:
-                            detected_phrases = []
-                            for r in gdino_detection_results:
-                                detected_phrases.extend(r['phrases'])
-                            unique_phrases = list(set(detected_phrases))
-                            print(f"🔍 GroundingDINO detected {total_detections} objects: {unique_phrases}")
-                        else:
-                            print(f"🔍 GroundingDINO: No objects detected above threshold")
-                            
-                    except Exception as e:
-                        print(f"⚠️ GroundingDINO inference failed: {e}")
-                        gdino_detection_results = []
 
                 # === DEPTH VISUALIZATION ===
                 local_points = predictions['local_points']  # shape (T, H, W, 3)
@@ -1827,22 +1691,6 @@ def train_model(train_config=None, experiment_tracker=None):
                         wandb_log_dict["visualizations/rgb_frames"] = rgb_images_for_wandb
                         print(f"🚀 Logged {len(rgb_images_for_wandb)} RGB input frames to WandB")
                     
-                    # Log GroundingDINO detection results
-                    if gdino_detection_results:
-                        total_detections = sum([r['num_detections'] for r in gdino_detection_results])
-                        detection_summary = {
-                            'total_detections': total_detections,
-                            'frames_processed': len(gdino_detection_results),
-                        }
-                        # Add per-phrase counts
-                        phrase_counts = {}
-                        for r in gdino_detection_results:
-                            for phrase in r['phrases']:
-                                phrase_counts[phrase] = phrase_counts.get(phrase, 0) + 1
-                        detection_summary.update(phrase_counts)
-                        
-                        wandb_log_dict["detections/grounding_dino_summary"] = detection_summary
-                        print(f"🔍 Logged GroundingDINO detection results: {total_detections} total detections")
                     
                     # Log depth images
                     if depth_images_for_wandb:
@@ -2165,54 +2013,6 @@ def train_model(train_config=None, experiment_tracker=None):
                 wandb_run_name=actual_run_name
             )
 
-
-def init_distributed(seed=42, train_on_cluster=False):
-    """
-    Initialize distributed training environment and set random seeds for reproducibility.
-    
-    Args:
-        seed (int): Random seed for PyTorch, NumPy, and Python's random module.
-                   Default is 42.
-    
-    Returns:
-        edict: Dictionary with attribute access containing:
-            - local_rank: GPU rank within the current node
-            - global_rank: Global rank of the process
-            - world_size: Total number of processes
-            - device: The CUDA device assigned to this process
-            - is_main_process: Flag to identify the main process
-            - seed: The random seed used for this process
-    """
-    global_rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    
-    if not train_on_cluster:
-        # ddp initializated when train_on_cluster is True, no need to initialize here
-        dist.init_process_group(
-            backend="nccl",
-            timeout=datetime.timedelta(seconds=3600)
-        )
-    
-    device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
-
-
-def train_with_config(config_path=None):
-    """
-    Train model using a YAML configuration file.
-    If config_path is None, uses default config.yaml.
-    Useful for direct training without Ray Tune.
-    """
-    if config_path:
-        # Create a temporary args object for custom config
-        class Args:
-            config = config_path
-            opts = []
-        cfg = get_cfg_defaults()
-        cfg = update_config(cfg, Args())
-    
-    train_model()
 
 def main():
     """Main function with argument parsing for configuration."""

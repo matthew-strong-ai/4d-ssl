@@ -212,14 +212,14 @@ MODEL:
   DETR_NUM_HEADS: 8             # Number of attention heads in DETR decoder
   DETR_NUM_LAYERS: 6            # Number of DETR decoder layers
 
-  USE_MOTION_HEAD: False    # Enable optional motion prediction head for point motion estimation
+  USE_MOTION_HEAD: True    # Enable optional motion prediction head for point motion estimation
   USE_SEGMENTATION_HEAD: True    # Enable optional segmentation head for per-pixel segmentation
   FREEZE_DECODERS: True    # Freeze point, conf, and camera decoders/heads to improve token representations
   USE_FROZEN_DECODER_SUPERVISION: False  # Use frozen model's decoder features as supervision for autoregressive transformer
 
 
 POINT_MOTION:
-  TRAIN_MOTION: False
+  TRAIN_MOTION: True
 
 # GroundingDINO Detection parameters
 DETECTION:
@@ -269,7 +269,7 @@ OUTPUT:
   CHECKPOINT_DIR: "checkpoints"  # Directory to save checkpoints
   SAVE_NPZ: False               # Save npz files  
   SAVE_DEPTHS: True             # Save depths files (every 200 steps)
-  SAVE_SEGMENTATION: False      # Save segmentation files (every 200 steps)
+  SAVE_SEGMENTATION: True      # Save segmentation files (every 200 steps)
   
   # S3 checkpoint upload
   UPLOAD_TO_S3: False             # Upload best checkpoints to S3
@@ -280,4 +280,4 @@ OUTPUT:
 WANDB:
   PROJECT: "autonomy-wild" # Weights & Biases project name
   USE_WANDB: True               # Enable Weights & Biases logging
-  RUN_NAME: "matt-youtube-autoregressive-pi3-lebron-james-freeze-decoder-seg-motion"  # W&B run name (optional)
+  RUN_NAME: "matt-youtube-autoregressive-pi3-lebron-james-freeze-decoder-seg-motion-1-gpu"  # W&B run name (optional)
