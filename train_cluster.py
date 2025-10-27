@@ -520,7 +520,16 @@ def train_model(train_config=None, experiment_tracker=None):
         
         print("==========================================\n")
 
-    gsam2 = GSAM2()
+    # Initialize segmentation model based on config
+    if cfg.MODEL.SEGMENTATION_MODEL == "gsam2":
+        gsam2 = GSAM2()
+        print("✅ Initialized GSAM2 for segmentation (6 classes)")
+    elif cfg.MODEL.SEGMENTATION_MODEL in ["segformer", "deeplabv3"]:
+        from utils.cityscapes_segmentation import CityscapesAsGSAM2
+        gsam2 = CityscapesAsGSAM2(model_type=cfg.MODEL.SEGMENTATION_MODEL)
+        print(f"✅ Initialized Cityscapes {cfg.MODEL.SEGMENTATION_MODEL} for segmentation (7 classes)")
+    else:
+        raise ValueError(f"Unknown segmentation model: {cfg.MODEL.SEGMENTATION_MODEL}")
 
     cotracker = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline").cuda()
     cotracker.eval()
@@ -904,6 +913,7 @@ def train_model(train_config=None, experiment_tracker=None):
                     rgb_frames = [video_tensor_unaugmented_14[0, t].permute(1, 2, 0).cpu().numpy() for t in range(X_all.shape[1])]
                     # Denormalize RGB frames to [0, 255]
                     rgb_frames = [(frame * 255).astype(np.uint8) for frame in rgb_frames]
+
                     # Run GSAM2 for object segmentation
                     with torch.no_grad():
                         results = gsam2.process_frames(rgb_frames, "car. vehicle. person. road sign. traffic light", verbose=False)
@@ -912,63 +922,78 @@ def train_model(train_config=None, experiment_tracker=None):
                     H, W = point_maps.shape[2:4]
                     composite_masks = []
                     
-                    # Define class mapping from GSAM2 labels to unique values
-                    class_mapping = {
-                        'car': 1,           # All vehicles -> class 1
-                        'vehicle': 1,       # All vehicles -> class 1  
-                        'truck': 1,         # All vehicles -> class 1
-                        'bus': 1,           # All vehicles -> class 1
-                        'motorcycle': 1,    # All vehicles -> class 1
-                        'bicycle': 2,       # Bicycle -> class 2
-                        'person': 3,        # Person -> class 3
-                        'road sign': 4,     # Road signs -> class 4
-                        'traffic light': 5, # Traffic lights -> class 5
-                        'default': 0        # Background/unrecognized -> class 0
-                    }
+                    # Define class mapping based on segmentation model
+                    if cfg.MODEL.SEGMENTATION_MODEL == "gsam2":
+                        # GSAM2 uses 6-class system
+                        class_mapping = {
+                            'car': 1,           # All vehicles -> class 1
+                            'vehicle': 1,       # All vehicles -> class 1  
+                            'truck': 1,         # All vehicles -> class 1
+                            'bus': 1,           # All vehicles -> class 1
+                            'motorcycle': 1,    # All vehicles -> class 1
+                            'bicycle': 2,       # Bicycle -> class 2
+                            'person': 3,        # Person -> class 3
+                            'road sign': 4,     # Road signs -> class 4
+                            'traffic light': 5, # Traffic lights -> class 5
+                            'default': 0        # Background/unrecognized -> class 0
+                        }
+                    else:
+                        # Cityscapes models use 7-class system
+                        # Results already contain class IDs, no mapping needed
+                        class_mapping = None
                     
-                    for t in range(results['num_frames']):
-                        frame_masks = results['masks'][t]
-                        frame_composite_mask = np.zeros((H, W), dtype=np.uint8)
-                        
-                        for obj_idx, obj_key in enumerate(frame_masks.keys()):
-                            # Get the label for this object
-                            if obj_idx < len(results['labels']):
-                                label = results['labels'][obj_idx].lower().strip()
-                                # Map label to class value - try full label first
-                                class_value = class_mapping.get(label, None)
-                                if class_value is None:
-                                    # Try first word only as fallback
-                                    first_word = label.split(' ')[0].strip()
-                                    class_value = class_mapping.get(first_word, class_mapping['default'])
-                            else:
-                                class_value = class_mapping['default']
+                    # Process masks differently based on model type
+                    if cfg.MODEL.SEGMENTATION_MODEL == "gsam2":
+                        # GSAM2 returns individual masks that need to be composed
+                        for t in range(results['num_frames']):
+                            frame_masks = results['masks'][t]
+                            frame_composite_mask = np.zeros((H, W), dtype=np.uint8)
                             
-                            segm_mask = frame_masks[obj_key].astype(bool)  # Convert to boolean mask
-                            if segm_mask.ndim == 3:
-                                segm_mask = segm_mask[0]  # Remove first dimension if present
+                            for obj_idx, obj_key in enumerate(frame_masks.keys()):
+                                # Get the label for this object
+                                if obj_idx < len(results['labels']):
+                                    label = results['labels'][obj_idx].lower().strip()
+                                    # Map label to class value - try full label first
+                                    class_value = class_mapping.get(label, None)
+                                    if class_value is None:
+                                        # Try first word only as fallback
+                                        first_word = label.split(' ')[0].strip()
+                                        class_value = class_mapping.get(first_word, class_mapping['default'])
+                                else:
+                                    class_value = class_mapping['default']
+                                
+                                segm_mask = frame_masks[obj_key].astype(bool)  # Convert to boolean mask
+                                if segm_mask.ndim == 3:
+                                    segm_mask = segm_mask[0]  # Remove first dimension if present
+                                
+                                # Assign class value to this object's pixels
+                                frame_composite_mask[segm_mask] = class_value
                             
-                            # Assign class value to this object's pixels
-                            frame_composite_mask[segm_mask] = class_value
-                            
-                        composite_masks.append(frame_composite_mask)
+                            composite_masks.append(frame_composite_mask)
+                    else:
+                        # Cityscapes models return composite masks directly
+                        composite_masks = results['composite_masks']
                     
+
                     # Run CoTracker for point tracking with binary mask
                     frames = torch.tensor(np.array(rgb_frames)).permute(0, 3, 1, 2)[None].float().to(device)
                     
                     # Create motion masks that EXCLUDE static objects (road signs and traffic lights)
                     # Only include moving objects: vehicles (1), bicycles (2), and persons (3)
-                    moving_object_classes = [1, 2, 3]  # Exclude 4 (road sign) and 5 (traffic light)
-                    motion_masks = []
-                    for mask in composite_masks:
-                        # Create binary mask only for moving objects
-                        motion_mask = np.zeros_like(mask, dtype=np.uint8)
-                        for class_val in moving_object_classes:
-                            motion_mask[mask == class_val] = 1
-                        motion_masks.append(motion_mask)
-                    
-                    # Use motion mask for CoTracker (only moving objects)
-                    binary_mask = motion_masks[0]
-                    binary_composite_masks = motion_masks
+                    if cfg.POINT_MOTION.TRAIN_MOTION:
+                        moving_object_classes = [1, 2, 3]  # Exclude 4 (road sign) and 5 (traffic light)
+                        
+                        motion_masks = []
+                        for mask in composite_masks:
+                            # Create binary mask only for moving objects
+                            motion_mask = np.zeros_like(mask, dtype=np.uint8)
+                            for class_val in moving_object_classes:
+                                motion_mask[mask == class_val] = 1
+                            motion_masks.append(motion_mask)
+                        
+                        # Use motion mask for CoTracker (only moving objects)
+                        binary_mask = motion_masks[0]
+                        binary_composite_masks = motion_masks
                     
                     if cfg.POINT_MOTION.TRAIN_MOTION:
                         with torch.no_grad():
@@ -1068,7 +1093,7 @@ def train_model(train_config=None, experiment_tracker=None):
                 torch.cuda.empty_cache()
             
             # Sync all processes after memory cleanup (outside conditional to avoid deadlock)
-            if cfg.OUTPUT.SAVE_DEPTHS and 'local_points' in predictions and global_step % 200 == 0 and accelerator.is_main_process:
+            if cfg.OUTPUT.SAVE_DEPTHS and 'local_points' in predictions and global_step % 100 == 0 and accelerator.is_main_process:
                 # Convert tensors to numpy
                 points = pseudo_gt["local_points"]
                 masks = torch.sigmoid(pseudo_gt["conf"][..., 0]) > 0.1
@@ -1266,10 +1291,11 @@ def train_model(train_config=None, experiment_tracker=None):
                     for t in range(min(pred_segmentation.shape[0], 8)):  # Limit to 8 frames
                         pred_frame = pred_segmentation[t]  # (H, W, 6)
                         # Check if we have multi-class output (6 channels) or single-class (1 channel)
-                        if pred_frame.shape[-1] == 6:
+                        if pred_frame.shape[-1] >= 6:  # Multi-class output
                             # Multi-class segmentation: apply softmax and get class predictions
-                            pred_logits = torch.from_numpy(pred_frame)  # (H, W, 6)
-                            pred_probs = torch.softmax(pred_logits, dim=-1)  # (H, W, 6)
+                            num_classes = pred_frame.shape[-1]
+                            pred_logits = torch.from_numpy(pred_frame)  # (H, W, num_classes)
+                            pred_probs = torch.softmax(pred_logits, dim=-1)  # (H, W, num_classes)
                             pred_classes = torch.argmax(pred_probs, dim=-1)  # (H, W)
                             pred_classes_np = pred_classes.numpy()
                             
@@ -1277,11 +1303,17 @@ def train_model(train_config=None, experiment_tracker=None):
                             import matplotlib.pyplot as plt
                             cmap = plt.get_cmap('tab10')
                             # Normalize class values to [0,1] for colormap
-                            pred_vis = cmap(pred_classes_np / 5.0)[:, :, :3]  # (H, W, 3)
+                            pred_vis = cmap(pred_classes_np / (num_classes - 1))[:, :, :3]  # (H, W, 3)
                             pred_vis_uint8 = (pred_vis * 255).astype(np.uint8)
                             
                             unique_classes = np.unique(pred_classes_np)
-                            class_names = ['background', 'vehicle', 'bicycle', 'person', 'road sign', 'traffic light']
+                            # Set class names based on number of classes
+                            if num_classes == 6:
+                                class_names = ['background', 'vehicle', 'bicycle', 'person', 'road sign', 'traffic light']
+                            elif num_classes == 7:
+                                class_names = ['road', 'vehicle', 'person', 'traffic light', 'traffic sign', 'sky', 'bg/building']
+                            else:
+                                class_names = [f'class_{i}' for i in range(num_classes)]
                             present_classes = [class_names[i] for i in unique_classes if i < len(class_names)]
                             print(f"🎨 Pred segmentation frame {t}: multi-class visualization")
                             print(f"   Present classes: {present_classes}")
@@ -1405,7 +1437,17 @@ def train_model(train_config=None, experiment_tracker=None):
                             gt_vis = cmap(gt_normalized)[:, :, :3]  # (H, W, 3), drop alpha
                             gt_vis_uint8 = (gt_vis * 255).astype(np.uint8)
                             
-                            class_names = ['background', 'vehicle', 'bicycle', 'person', 'road sign', 'traffic light']
+                            # Determine number of classes from unique values
+                            num_classes_gt = int(max_val) + 1 if max_val < 10 else 6  # Fallback to 6 if unclear
+                            
+                            # Set class names based on number of classes
+                            if num_classes_gt == 6:
+                                class_names = ['background', 'vehicle', 'bicycle', 'person', 'road sign', 'traffic light']
+                            elif num_classes_gt == 7:
+                                class_names = ['road', 'vehicle', 'person', 'traffic light', 'traffic sign', 'sky', 'bg/building']
+                            else:
+                                class_names = [f'class_{i}' for i in range(num_classes_gt)]
+                            
                             present_classes = [class_names[int(i)] for i in unique_vals if int(i) < len(class_names)]
                             print(f"🎨 GT segmentation frame {t}: class-aware visualization")
                             print(f"   Present classes: {present_classes}")
@@ -1826,7 +1868,8 @@ def train_model(train_config=None, experiment_tracker=None):
                     }
                     
                     best_val_model_path = os.path.join(cfg.OUTPUT.CHECKPOINT_DIR, 'best_val_model.pt')
-                    # torch.save(best_val_checkpoint, best_val_model_path)
+                    print(f"📝 Saving best validation model locally to: {best_val_model_path}")
+                    torch.save(best_val_checkpoint, best_val_model_path)
                     print(f"💾 New best validation model saved! Val Loss: {best_val_loss:.6f}")
                     
                     # Upload best validation model to S3
@@ -1884,7 +1927,8 @@ def train_model(train_config=None, experiment_tracker=None):
                     }
                     
                     best_model_path = os.path.join(cfg.OUTPUT.CHECKPOINT_DIR, 'best_model.pt')
-                    # torch.save(checkpoint, best_model_path)
+                    print(f"📝 Saving best training model locally to: {best_model_path}")
+                    torch.save(checkpoint, best_model_path)
                     print(f"💾 New best model saved! Loss: {best_loss:.6f} at step {global_step}")
                     
                     # Upload best training model to S3
