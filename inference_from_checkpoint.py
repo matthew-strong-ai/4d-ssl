@@ -3,7 +3,6 @@
 Sample inference script for loading trained model checkpoints and running inference.
 Demonstrates loading from both local files and S3.
 """
-
 import os
 import sys
 import torch
@@ -19,7 +18,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pi3"))
 from config.defaults import get_cfg_defaults, update_config
 from utils.model_factory import create_model
 from s3_utils import download_from_s3_uri
-from SpaTrackerV2.models.SpaTrackV2.models.vggt4track.utils.load_fn import preprocess_image
+from utils.image_preprocessing import preprocess_image
 
 # Add YACS CfgNode to safe globals for PyTorch 2.6+
 import yacs.config
