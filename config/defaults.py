@@ -58,6 +58,8 @@ _C.MODEL.DETR_NUM_HEADS = 8                # Number of attention heads in DETR d
 _C.MODEL.DETR_NUM_LAYERS = 6               # Number of DETR decoder layers
 _C.MODEL.USE_MOTION_HEAD = False           # Enable motion head
 _C.MODEL.USE_SEGMENTATION_HEAD = True       # Enable segmentation head
+_C.MODEL.SEGMENTATION_MODEL = "segformer"   # Segmentation model: "gsam2", "segformer", "deeplabv3"
+_C.MODEL.SEGMENTATION_NUM_CLASSES = 7       # Number of segmentation classes (7 for Cityscapes, 6 for GSAM2)
 _C.MODEL.FREEZE_DECODERS = False            # Freeze point, conf, and camera decoders/heads
 _C.MODEL.USE_FROZEN_DECODER_SUPERVISION = False  # Use frozen model's decoder features as supervision for autoregressive transformer
 

@@ -2019,34 +2019,31 @@ class SegmentationLosses:
             gt_flat = gt_classes.reshape(-1)  # [B*T*H*W]
             pred_flat = pred_segmentation.reshape(-1, pred_segmentation.size(-1))  # [B*T*H*W, 4]
             
-            # Strategy 1: Compute class frequencies for dynamic weighting
-            unique_classes, class_counts = torch.unique(gt_flat, return_counts=True)
-            total_pixels = gt_flat.numel()
-            
-            # Debug: Print class distribution every 100 steps (optional)
-            debug_class_dist = False  # Set to True for debugging
-            if debug_class_dist and torch.rand(1) < 0.01:  # 1% chance to print
-                print(f"🎯 Class Distribution Debug:")
-                class_names = ['bg', 'vehicle', 'bicycle', 'person', 'road sign', 'traffic light']
-                for i, class_id in enumerate(unique_classes):
-                    if class_id < len(class_names):
-                        percentage = (class_counts[i].float() / total_pixels * 100)
-                        print(f"   Class {class_id} ({class_names[class_id]}): {percentage:.2f}%")
-                background_pct = (class_counts[0].float() / total_pixels * 100) if 0 in unique_classes else torch.tensor(0.0)
-                print(f"   Background dominance: {background_pct:.1f}%")
-            
-            # Create class weights to handle severe imbalance (background dominates)
-            num_classes = 6
+            # Dynamically determine number of classes from predictions
+            num_classes = pred_segmentation.shape[-1]  # Last dimension is number of classes
             class_weights = torch.ones(num_classes, device=gt_segmentation.device)
-            
-            # Simple class weighting: background low, all objects equal
-            class_weights[0] = 0.2   # Low weight for background
-            class_weights[1:] = 1.2  # Same weight for all object classes
-            # weight person class a little more
-            class_weights[3] = 1.6   # Person
-            # weight road signs and traffic lights more as they're smaller
-            class_weights[4] = 1.8   # Road sign
-            class_weights[5] = 1.8   # Traffic light
+
+            # Class weighting based on number of classes
+            if num_classes == 6:
+                # GSAM2 classes: background, vehicle, bicycle, person, road sign, traffic light
+                class_weights[0] = 0.2   # Low weight for background
+                class_weights[1:] = 1.2  # Same weight for all object classes
+                class_weights[3] = 1.6   # Person
+                class_weights[4] = 1.8   # Road sign
+                class_weights[5] = 1.8   # Traffic light
+            elif num_classes == 7:
+                # Cityscapes classes: road, vehicle, person, traffic light, traffic sign, sky, background
+                class_weights[0] = 0.5   # Road (common but important)
+                class_weights[1] = 1.2   # Vehicle
+                class_weights[2] = 1.6   # Person
+                class_weights[3] = 1.8   # Traffic light (small, important)
+                class_weights[4] = 1.8   # Traffic sign (small, important)
+                class_weights[5] = 0.3   # Sky (common, less important)
+                class_weights[6] = 0.2   # Building/grass/background
+            else:
+                # Default: balance all classes except first (assumed background)
+                class_weights[0] = 0.2
+                class_weights[1:] = 1.2
             
             # Strategy 2: Option to use Focal Loss instead of weighted CE
             use_focal_loss = False  # Set to True to use focal loss for severe imbalance

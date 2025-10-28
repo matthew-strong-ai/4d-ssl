@@ -1,0 +1,39 @@
+# Example config for using Cityscapes SegFormer segmentation
+# instead of GroundedSAM2
+
+MODEL:
+  ARCHITECTURE: "Pi3"  # or "AutoregressivePi3"
+  ENCODER_NAME: "dinov3_decoupled"
+  M: 3  # Input frames
+  N: 3  # Future frames to predict
+  
+  # Segmentation configuration
+  USE_SEGMENTATION_HEAD: True
+  SEGMENTATION_MODEL: "segformer"  # Options: "gsam2", "segformer", "deeplabv3"
+  SEGMENTATION_NUM_CLASSES: 7      # 7 for Cityscapes (road, vehicle, person, traffic light, traffic sign, sky, background)
+  
+  # Other model settings
+  USE_MOTION_HEAD: True
+  USE_DETECTION_HEAD: False
+
+# Loss weights - adjust for 7 classes
+LOSS:
+  SEGMENTATION_LOSS_WEIGHT: 1.0
+  MOTION_LOSS_WEIGHT: 1.0
+  PC_LOSS_WEIGHT: 100.0
+  POSE_LOSS_WEIGHT: 1000.0
+  CONF_LOSS_WEIGHT: 2.0
+  NORMAL_LOSS_WEIGHT: 10.0
+
+# Training settings
+DATASET:
+  BATCH_SIZE: 1
+  WORKERS: 8
+
+TRAIN:
+  LEARNING_RATE: 1e-4
+  NUM_EPOCHS: 100
+  
+OUTPUT:
+  SAVE_SEGMENTATION: True
+  SAVE_MOTION: True

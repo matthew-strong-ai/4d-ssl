@@ -490,8 +490,6 @@ def train_model(train_config=None, experiment_tracker=None):
     frozen_model = frozen_model.to(accelerator.device)
     frozen_model.requires_grad_(False)  # freeze parameters
 
-
-
     # Validate model configuration
     validate_model_config(cfg)
     
@@ -1126,7 +1124,7 @@ def train_model(train_config=None, experiment_tracker=None):
                     epoch == 0 and global_step < 1000 and accelerator.is_main_process):
                     B, T, C, H, W = video_tensor_unaugmented_14.shape
                     rgb_frames = []
-                    for t in range(min(T, 8)):
+                    for t in range(min(T, 10)):
                         img = video_tensor_unaugmented_14[0, t].cpu().numpy().transpose(1, 2, 0)  # (H, W, C)
                         img = np.clip(img * 255, 0, 255).astype(np.uint8)
                         rgb_frames.append(img)
@@ -1237,7 +1235,7 @@ def train_model(train_config=None, experiment_tracker=None):
                 rgb_images_for_wandb = []
                 if cfg.WANDB.USE_WANDB:
                     B, T, C, H, W = X_all_augmented.shape
-                    for t in range(min(T, 8)):  # Log up to 6 frames
+                    for t in range(min(T, 10)):  # Log up to 6 frames
                         # Convert from tensor to numpy and transpose for WandB
                         img = X_all_augmented[0, t].cpu().numpy()  # (C, H, W)
                         img = np.transpose(img, (1, 2, 0))  # (H, W, C)

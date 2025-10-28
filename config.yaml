@@ -18,7 +18,7 @@ DATASET:
   YOUTUBE_SKIP_FRAMES: 300        # Skip first 300 frames per video
   YOUTUBE_MIN_SEQUENCE_LENGTH: 50 # Minimum frames in video
   YOUTUBE_MAX_WORKERS: 32         # Parallel S3 workers for initial indexing
-  MAX_SAMPLES: 1000                # Limit dataset to 100 samples for testing (set to -1 for full dataset)
+  MAX_SAMPLES: -1                # Limit dataset to 100 samples for testing (set to -1 for full dataset)
   
   # Old S3 dataset configuration (DISABLED - keeping for reference)  
   # USE_S3: True                    # Use S3 dataset instead of local files
@@ -189,8 +189,8 @@ DATASET:
 
 # Model parameters  
 MODEL:
-  M: 3                          # Number of input frames
-  N: 3                           # Number of target frames
+  M: 5                          # Number of input frames
+  N: 1                           # Number of target frames
   GRID_SIZE: 10                  # Grid size for query points1
   ENCODER_NAME: "dinov2"         # Encoder type: "dinov2" or "dinov3"
   ARCHITECTURE: "AutoregressivePi3"    # Model architecture: "AutonomyPi3" or "AutoregressivePi3"
@@ -212,14 +212,16 @@ MODEL:
   DETR_NUM_HEADS: 8             # Number of attention heads in DETR decoder
   DETR_NUM_LAYERS: 6            # Number of DETR decoder layers
 
-  USE_MOTION_HEAD: True    # Enable optional motion prediction head for point motion estimation
+  USE_MOTION_HEAD: False    # Enable optional motion prediction head for point motion estimation
   USE_SEGMENTATION_HEAD: True    # Enable optional segmentation head for per-pixel segmentation
+  # USE_ROAD_SEGMENTATION: True   # Enable road segmentation using pretrained SegFormer
+  # ROAD_AS_SEPARATE_CLASS: True  # Treat road as class 6 (or merge with background)
   FREEZE_DECODERS: True    # Freeze point, conf, and camera decoders/heads to improve token representations
   USE_FROZEN_DECODER_SUPERVISION: False  # Use frozen model's decoder features as supervision for autoregressive transformer
 
 
 POINT_MOTION:
-  TRAIN_MOTION: True
+  TRAIN_MOTION: False
 
 # GroundingDINO Detection parameters
 DETECTION:
@@ -261,7 +263,7 @@ VALIDATION:
 # Logging parameters
 LOGGING:
   LOG_FREQ: 100                  # Log every N steps
-  SAVE_FREQ: 10000               # Check for best model every N steps
+  SAVE_FREQ: 1000               # Check for best model every N steps
   N_VISUALIZE: 3                # Number of random batches to visualize before training
 
 # Output parameters
@@ -272,7 +274,7 @@ OUTPUT:
   SAVE_SEGMENTATION: True      # Save segmentation files (every 200 steps)
   
   # S3 checkpoint upload
-  UPLOAD_TO_S3: False             # Upload best checkpoints to S3
+  UPLOAD_TO_S3: False        # Upload best checkpoints to S3
   S3_BUCKET: "research-datasets"  # S3 bucket for checkpointts
   S3_PREFIX: "autonomy_checkpoints"  # S3 prefix/folder
 
@@ -280,4 +282,4 @@ OUTPUT:
 WANDB:
   PROJECT: "autonomy-wild" # Weights & Biases project name
   USE_WANDB: True               # Enable Weights & Biases logging
-  RUN_NAME: "matt-youtube-autoregressive-pi3-lebron-james-freeze-decoder-seg-motion-1-gpu"  # W&B run name (optional)
+  RUN_NAME: "matt-segmentation-prediction"  # W&B run name (optional)
