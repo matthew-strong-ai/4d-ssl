@@ -12,11 +12,71 @@ import sys
 import os
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from utils.model_factory import create_model
+from config.defaults import get_cfg_defaults, update_config
+
+import yacs.config
+torch.serialization.add_safe_globals([yacs.config.CfgNode])
+
+
 
 # Add Pi3 to path
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pi3"))
 
 from pi3.models.pi3 import Pi3
+
+MODEL_CHECKPOINT = "checkpoints/best_model.pt"
+
+def load_checkpoint(checkpoint_path, cfg, device='cuda'):
+    """
+    Load a model checkpoint from either local file or S3.
+    
+    Args:
+        checkpoint_path: Path to checkpoint (local file or s3:// URI)
+        cfg: Configuration object
+        device: Device to load model on
+    
+    Returns:
+        model: Loaded model ready for inference
+        checkpoint: Full checkpoint dictionary
+    """
+
+    print(f"🔄 Loading checkpoint from: {checkpoint_path}")
+    
+    # Load checkpoint
+    if checkpoint_path.startswith('s3://'):
+        print("📥 Downloading from S3...")
+        local_temp_path = os.path.join("checkpoints", "temp_downloaded_model.pt")
+        os.makedirs("checkpoints", exist_ok=True)
+        
+        success = download_from_s3_uri(checkpoint_path, local_temp_path, overwrite=True)
+        if not success:
+            raise RuntimeError(f"Failed to download checkpoint from {checkpoint_path}")
+        
+        checkpoint = torch.load(local_temp_path, map_location=device)
+    else:
+        print("📂 Loading from local file...")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Get DINOv3 encoder path (required for model creation)
+    dinov3_local_path = "dinov3/dinov3_vitl14_448.pth"
+    if not os.path.exists(dinov3_local_path):
+        print("⚠️  DINOv3 checkpoint not found locally, model will download it")
+        dinov3_local_path = None
+    
+
+    print(f"🏗️  Creating {cfg.MODEL.ARCHITECTURE} model...")
+    model = create_model(cfg, dinov3_local_path)
+    
+    # Load state dict
+    print("📦 Loading model weights...")
+    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # Move to device and set to eval mode
+    model = model.to(device)
+    model.eval()
+    return model, checkpoint
+
 
 
 def load_pretrained_pi3(device='cuda'):
@@ -30,6 +90,16 @@ def load_pretrained_pi3(device='cuda'):
     
     print("✅ Pi3 model loaded successfully!")
     return model
+
+
+def load_autoregressive_pi3():
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # Create model
+    cfg = get_cfg_defaults()
+    cfg = update_config(cfg)
+    model, checkpoint = load_checkpoint(MODEL_CHECKPOINT, cfg, device)
+
+    return model, checkpoint
 
 
 def preprocess_images(image_paths, target_width=518, target_height=294):
@@ -65,7 +135,7 @@ def preprocess_images(image_paths, target_width=518, target_height=294):
     return video_tensor
 
 
-def run_pi3_inference(model, video_tensor):
+def run_pi3_inference(model, video_tensor, is_autoregressive=False):
     """
     Run Pi3 inference on preprocessed video tensor.
     
@@ -80,12 +150,16 @@ def run_pi3_inference(model, video_tensor):
     
     # Add batch dimension [1, T, C, H, W]
     video_batch = video_tensor.unsqueeze(0).to(device)
+
+    # if is autoregressive, give only 3 frame
+    if is_autoregressive:
+        video_batch = video_batch[:, :3, ...]
     
     print(f"🔮 Running Pi3 inference on {video_tensor.shape[0]} frames...")
     
     with torch.no_grad():
         predictions = model(video_batch)
-    
+
     # Remove batch dimension from predictions
     for key in predictions:
         if isinstance(predictions[key], torch.Tensor) and predictions[key].shape[0] == 1:
@@ -217,16 +291,31 @@ def main():
     print("🔄 Preprocessing images...")
     video_tensor = preprocess_images(sample_image_paths)
     print(f"   Input shape: {video_tensor.shape}")
-    
+
     # Run inference
     print("🔮 Running Pi3 inference...")
     predictions = run_pi3_inference(model, video_tensor)
 
-    # dino features
+    # get regular pi3 features
     dino_features = predictions['dino_features']
-
     print(f"   DINO features shape: {dino_features.shape}")
 
+    pi3_features = predictions['pi3_features']
+    print(f"   Pi3 features shape: {pi3_features.shape}")
+
+
+    # delete model to free up memory
+    del model
+    torch.cuda.empty_cache()
+
+    # let us run the (our) autoregressive pi3 model
+    model, checkpoint = load_autoregressive_pi3()
+    print("🔮 Running Autoregressive Pi3 inference...")
+    predictions = run_pi3_inference(model, video_tensor, is_autoregressive=True)
+
+    # dino features
+    dino_features = predictions['dino_features']
+    print(f"   DINO features shape: {dino_features.shape}")
 
     pi3_features = predictions['pi3_features']
     print(f"   Pi3 features shape: {pi3_features.shape}")
