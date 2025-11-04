@@ -109,7 +109,8 @@ class Pi3Losses:
 
     @staticmethod
     def pi3_loss(predictions, gt, epsilon=0.1, m_frames=3, future_frame_weight=2.0, gradient_weight=0.1, 
-                 normal_loss_weight=0.0, detection_targets=None, detection_loss_weight=0.0, segformer=None, images=None):
+                 normal_loss_weight=0.0, detection_targets=None, detection_loss_weight=0.0, segformer=None, images=None,
+                 motion_threshold=0.1):
         """
         Pi3 loss between prediction and gt dict.
         Assumes predictions and gt have same shapes.
@@ -126,12 +127,11 @@ class Pi3Losses:
             detection_loss_weight: Weight for detection loss (0.0 disables it)
         """
         sky_mask = None
-        if False and segformer is not None and images is not None:
+        if segformer is not None and images is not None:
             # combine B and N dimensions for segmentation
             B, N, C, H, W = images.shape
             images_reshaped = images.view(B * N, C, H, W)
             sky_mask = Pi3Losses.get_sky_mask(segformer, images_reshaped).reshape(B, N, H, W)  # [B, N, H, W]
-
 
         # according to the authors, the loss is performed on the *local* point maps
         # predictions, gt = normalize_pred_gt(predictions, gt)
@@ -174,12 +174,22 @@ class Pi3Losses:
         # compute motion loss if motion targets are provided
         motion_loss_val = 0.0
         if "motion" in predictions and "motion" in gt:
-            pred_motion = predictions["motion"]  # [B, T, H, W, 3] with 3D motion vectors
-            gt_motion = gt["motion"]  # Should be [B, T, H, W, 3] or broadcastable
-            # crop up to T of 5
-            pred_motion = pred_motion[:, :5]
-            motion_loss_val = MotionLosses.motion_smooth_l1_loss(pred_motion, gt_motion)
+            pred_motion = predictions["motion"]  # [B, T, H, W, 1] with binary motion mask logits
+            gt_motion = gt["motion"]  # [B, T, H, W, 1] binary masks (0=static object, 1=dynamic object)
+            # crop to match the minimum sequence length (no hardcoded 5)
+            min_frames = min(pred_motion.shape[1], gt_motion.shape[1] if gt_motion.dim() >= 2 else pred_motion.shape[1])
+            pred_motion = pred_motion[:, :min_frames]
+            if gt_motion.dim() >= 2:
+                gt_motion = gt_motion[:min_frames] if gt_motion.dim() == 4 else gt_motion[:, :min_frames]
+            motion_loss_val = MotionLosses.motion_binary_mask_bce_loss(pred_motion, gt_motion, motion_threshold=motion_threshold)
 
+        # compute flow loss if flow targets are provided
+
+        flow_loss_val = 0.0
+        if "flow" in predictions and "flow" in gt:
+            pred_flow = predictions["flow"]  # [B, T, H, W, 2] with 2D flow vectors (dx, dy)
+            gt_flow = gt["flow"]  # [B, T, H, W, 2] or [T, H, W, 2] optical flow ground truth
+            flow_loss_val = flow_l2_loss(pred_flow, gt_flow)
 
         # compute frozen decoder supervision loss if features are available
         frozen_decoder_loss_val = 0.0
@@ -187,11 +197,12 @@ class Pi3Losses:
             frozen_decoder_loss_val = FrozenDecoderSupervision.decoder_feature_loss(predictions, gt, m_frames=m_frames)
 
         # compute total loss
-        return point_map_loss, camera_pose_loss, confidence_loss, normal_loss, segmentation_loss_val, motion_loss_val, frozen_decoder_loss_val
+        return point_map_loss, camera_pose_loss, confidence_loss, normal_loss, segmentation_loss_val, motion_loss_val, flow_loss_val, frozen_decoder_loss_val
 
     @staticmethod
     def pi3_loss_with_confidence_weighting(predictions, gt, epsilon=0.1, m_frames=3, future_frame_weight=2.0, 
-                                         gamma=1.0, alpha=0.1, use_conf_weighted_points=True, gradient_weight=0.1, normal_loss_weight=0.0, detection_targets=None, detection_loss_weight=0.0, segformer=None, images=None):
+                                         gamma=1.0, alpha=0.1, use_conf_weighted_points=True, gradient_weight=0.1, normal_loss_weight=0.0, detection_targets=None, detection_loss_weight=0.0, segformer=None, images=None,
+                                         motion_threshold=0.1):
         """
         Pi3 loss with optional confidence-weighted point loss.
         
@@ -214,7 +225,7 @@ class Pi3Losses:
         
         # Generate sky mask if segformer and images are provided
         sky_mask = None
-        if False and segformer is not None and images is not None:
+        if segformer is not None and images is not None:
             B, N, C, H, W = images.shape
             images_reshaped = images.view(B * N, C, H, W)
             sky_mask = Pi3Losses.get_sky_mask(segformer, images_reshaped).reshape(B, N, H, W)  # [B, N, H, W]
@@ -295,16 +306,23 @@ class Pi3Losses:
         # compute motion loss if motion targets are provided
         motion_loss_val = 0.0
         if "motion" in predictions and "motion" in gt:
-            pred_motion = predictions["motion"]  # [B, T, H, W, 3] with 3D motion vectors
-            gt_motion = gt["motion"]  # Should be [B, T, H, W, 3] or broadcastable
-            motion_loss_val = MotionLosses.motion_smooth_l1_loss(pred_motion, gt_motion)
+            pred_motion = predictions["motion"]  # [B, T, H, W, 1] with binary motion mask logits
+            gt_motion = gt["motion"]  # [B, T, H, W, 1] binary masks (0=static object, 1=dynamic object)
+            motion_loss_val = MotionLosses.motion_binary_mask_bce_loss(pred_motion, gt_motion, motion_threshold=motion_threshold)
+
+        # compute flow loss if flow targets are provided
+        flow_loss_val = 0.0
+        if "flow" in predictions and "flow" in gt:
+            pred_flow = predictions["flow"]  # [B, T, H, W, 2] with 2D flow vectors (dx, dy)
+            gt_flow = gt["flow"]  # [B, T, H, W, 2] or [T, H, W, 2] optical flow ground truth
+            flow_loss_val = flow_l2_loss(pred_flow, gt_flow)
 
         # compute frozen decoder supervision loss if features are available
         frozen_decoder_loss_val = 0.0
         if "features" in gt and "all_decoder_features" in predictions:
             frozen_decoder_loss_val = FrozenDecoderSupervision.decoder_feature_loss(predictions, gt, m_frames=m_frames)
 
-        return point_map_loss, camera_pose_loss, confidence_loss, normal_loss, detection_loss_val, segmentation_loss_val, motion_loss_val, frozen_decoder_loss_val
+        return point_map_loss, camera_pose_loss, confidence_loss, normal_loss, detection_loss_val, segmentation_loss_val, motion_loss_val, flow_loss_val, frozen_decoder_loss_val
 
 
 class ConfidenceLosses:
@@ -2151,6 +2169,37 @@ class MotionLosses:
     """Motion losses for training motion head"""
     
     @staticmethod
+    def motion_binary_mask_bce_loss(pred_motion, gt_motion, motion_threshold=0.1):
+        """
+        Binary cross entropy loss for motion mask prediction.
+        
+        Args:
+            pred_motion: Predicted motion logits [B, T, H, W, 1] 
+            gt_motion: Ground truth motion masks [B, T, H, W, 1] or [T, H, W, 1] (already binary: 0=static, 1=dynamic)
+            motion_threshold: Not used anymore since gt_motion is already binary
+            
+        Returns:
+            BCE loss tensor
+        """
+        # Handle shape differences - gt might be [T, H, W, 1], pred is [B, T, H, W, 1]
+        if gt_motion.dim() == 4 and pred_motion.dim() == 5:
+            # Expand gt to match pred batch dimension
+            gt_motion = gt_motion.unsqueeze(0)  # [1, T, H, W, 1]
+            
+        # Convert to float
+        pred_motion = pred_motion.float()
+        gt_motion = gt_motion.float()
+        
+        # GT is already binary (0 or 1), no need to compute magnitude
+        binary_gt = gt_motion  # [B, T, H, W, 1]
+        
+        # Use BCE with logits for numerical stability and autocast compatibility
+        # This combines sigmoid and BCE in one operation
+        bce_loss = F.binary_cross_entropy_with_logits(pred_motion, binary_gt, reduction='mean')
+        
+        return bce_loss
+    
+    @staticmethod
     def motion_mse_loss(pred_motion, gt_motion):
         """
         MSE loss for motion prediction.
@@ -2296,6 +2345,133 @@ class MotionLosses:
         magnitude_loss = F.l1_loss(pred_magnitude, gt_magnitude, reduction='mean')
         
         return magnitude_loss
+
+
+# ============================
+# Flow Loss Functions
+# ============================
+
+def flow_l2_loss(pred_flow, gt_flow):
+    """
+    L2 loss for optical flow prediction.
+    
+    Args:
+        pred_flow: Predicted optical flow [B, T, H, W, 2] with (dx, dy) flow vectors
+        gt_flow: Ground truth optical flow [B, T, H, W, 2] or [T, H, W, 2]
+        
+    Returns:
+        L2 loss tensor
+    """
+    # Handle shape differences
+    if gt_flow.dim() == 4 and pred_flow.dim() == 5:
+        gt_flow = gt_flow.unsqueeze(0).expand_as(pred_flow)
+    
+    # Convert to float
+    pred_flow = pred_flow.float()
+    gt_flow = gt_flow.float()
+    
+    # L2 loss
+    return F.mse_loss(pred_flow, gt_flow)
+
+
+def flow_l1_loss(pred_flow, gt_flow):
+    """
+    L1 loss for optical flow prediction.
+    
+    Args:
+        pred_flow: Predicted optical flow [B, T, H, W, 2] with (dx, dy) flow vectors
+        gt_flow: Ground truth optical flow [B, T, H, W, 2] or [T, H, W, 2]
+        
+    Returns:
+        L1 loss tensor
+    """
+    # Handle shape differences
+    if gt_flow.dim() == 4 and pred_flow.dim() == 5:
+        gt_flow = gt_flow.unsqueeze(0).expand_as(pred_flow)
+    
+    # Convert to float
+    pred_flow = pred_flow.float()
+    gt_flow = gt_flow.float()
+    
+    # L1 loss
+    return F.l1_loss(pred_flow, gt_flow)
+
+
+def flow_smooth_l1_loss(pred_flow, gt_flow, beta=1.0):
+    """
+    Smooth L1 loss for optical flow prediction.
+    
+    Args:
+        pred_flow: Predicted optical flow [B, T, H, W, 2] with (dx, dy) flow vectors
+        gt_flow: Ground truth optical flow [B, T, H, W, 2] or [T, H, W, 2]
+        beta: threshold for smooth L1 loss
+        
+    Returns:
+        Smooth L1 loss tensor
+    """
+    # Handle shape differences
+    if gt_flow.dim() == 4 and pred_flow.dim() == 5:
+        gt_flow = gt_flow.unsqueeze(0).expand_as(pred_flow)
+    
+    # Convert to float
+    pred_flow = pred_flow.float()
+    gt_flow = gt_flow.float()
+    
+    # Smooth L1 loss
+    return F.smooth_l1_loss(pred_flow, gt_flow, beta=beta)
+
+
+def flow_magnitude_loss(pred_flow, gt_flow):
+    """
+    Flow magnitude loss - focuses on the magnitude of flow vectors.
+    
+    Args:
+        pred_flow: Predicted optical flow [B, T, H, W, 2] with (dx, dy) flow vectors
+        gt_flow: Ground truth optical flow [B, T, H, W, 2] or [T, H, W, 2]
+        
+    Returns:
+        Magnitude loss tensor
+    """
+    # Handle shape differences
+    if gt_flow.dim() == 4 and pred_flow.dim() == 5:
+        gt_flow = gt_flow.unsqueeze(0).expand_as(pred_flow)
+    
+    # Convert to float
+    pred_flow = pred_flow.float()
+    gt_flow = gt_flow.float()
+    
+    # Compute magnitudes
+    pred_magnitude = torch.norm(pred_flow, dim=-1)  # [B, T, H, W]
+    gt_magnitude = torch.norm(gt_flow, dim=-1)      # [B, T, H, W]
+    
+    # L2 loss on magnitudes
+    return F.mse_loss(pred_magnitude, gt_magnitude)
+
+
+def flow_endpoint_error(pred_flow, gt_flow):
+    """
+    Average endpoint error (EPE) for optical flow evaluation.
+    
+    Args:
+        pred_flow: Predicted optical flow [B, T, H, W, 2] with (dx, dy) flow vectors
+        gt_flow: Ground truth optical flow [B, T, H, W, 2] or [T, H, W, 2]
+        
+    Returns:
+        Average endpoint error
+    """
+    # Handle shape differences
+    if gt_flow.dim() == 4 and pred_flow.dim() == 5:
+        gt_flow = gt_flow.unsqueeze(0).expand_as(pred_flow)
+    
+    # Convert to float
+    pred_flow = pred_flow.float()
+    gt_flow = gt_flow.float()
+    
+    # Compute endpoint error: ||pred - gt||_2
+    epe = torch.norm(pred_flow - gt_flow, dim=-1)  # [B, T, H, W]
+    
+    # Return average
+    return epe.mean()
 
 
 class FrozenDecoderSupervision:

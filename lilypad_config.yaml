@@ -1,4 +1,4 @@
-name: matt-youtube-autoregressive-pi3-lebron-james-freeze-decoder-future
+name: matt-sky-base-prediction
 
 workload_variant_config:
   training_fn: train_cluster.train_model
