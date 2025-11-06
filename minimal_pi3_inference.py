@@ -303,10 +303,21 @@ def main():
     pi3_features = predictions['pi3_features']
     print(f"   Pi3 features shape: {pi3_features.shape}")
 
+    camera_features = predictions['camera_features']
+    print(f"   Camera features shape: {camera_features.shape}")
+
+    conf_features = predictions['conf_features']
+    print(f"   Conf features shape: {conf_features.shape}")
+
+    point_features = predictions['point_features']
+    print(f"   Point features shape: {point_features.shape}")
+
 
     # delete model to free up memory
     del model
     torch.cuda.empty_cache()
+
+    exit()
 
     # let us run the (our) autoregressive pi3 model
     model, checkpoint = load_autoregressive_pi3()
