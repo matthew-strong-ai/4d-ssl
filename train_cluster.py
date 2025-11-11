@@ -36,7 +36,7 @@ from pi3.utils.geometry import depth_edge
 from pi3.models.pi3 import Pi3, AutonomyPi3, AutoregressivePi3
 
 # Import distilled ViT
-from distilled_vit import create_distilled_vit, DistillationLoss
+from distilled_vit import create_distilled_vit, DistillationLoss, visualize_distilled_pca
 
 # import pi3 losses
 from losses import Pi3Losses, NormalLosses, PointCloudLosses, normalize_pred_gt
@@ -1683,26 +1683,29 @@ def train_model(train_config=None, experiment_tracker=None):
                         last_input_frame = video_tensor_unaugmented_14[0, cfg.MODEL.M-1]  # [3, H, W] - last input frame
                         student_features = distilled_vit(last_input_frame.unsqueeze(0))  # [1, 3, H, W] -> single image
                         
-                        # Extract teacher spatial features from the last input frame features
+                        # Extract teacher feature differences between M-1 and M indices  
                         teacher_features = {}
                         
-                        # Get the teacher model features for the last input frame
+                        # Get the teacher model features as mean pool of temporal frames
                         with torch.no_grad():
-                            # Extract spatial features for different modalities
+                            # Extract mean pooled features between consecutive frames
                             if 'point_features' in cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS:
-                                # Use features from the last input frame (M-1 index)
-                                last_input_idx = cfg.MODEL.M # - 1
-                                teacher_features['point_features'] = predictions['point_features'][last_input_idx:last_input_idx+1, :, :]  # [1, S, D]
+                                # Mean pool frame M and frame M-1
+                                frame_m_minus_1 = predictions['point_features'][cfg.MODEL.M - 1]  # [S, D]
+                                frame_m = predictions['point_features'][cfg.MODEL.M]  # [S, D] 
+                                teacher_features['point_features'] = ((frame_m + frame_m_minus_1) / 2.0).unsqueeze(0)  # [1, S, D]
                             
                             if 'camera_features' in cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS:
-                                # Use spatial features from the last input frame (M-1 index)  
-                                last_input_idx = cfg.MODEL.M - 1
-                                teacher_features['camera_features'] = predictions['camera_features'][last_input_idx:last_input_idx+1, :, :]  # [1, S, D]
+                                # Mean pool frame M and frame M-1
+                                frame_m_minus_1 = predictions['camera_features'][cfg.MODEL.M - 1]  # [S, D]
+                                frame_m = predictions['camera_features'][cfg.MODEL.M]  # [S, D]
+                                teacher_features['camera_features'] = ((frame_m + frame_m_minus_1) / 2.0).unsqueeze(0)  # [1, S, D]
                                 
                             if 'autonomy_features' in cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS:
-                                # Use features from the last input frame (M-1 index)
-                                last_input_idx = cfg.MODEL.M - 1
-                                teacher_features['autonomy_features'] = predictions['autonomy_features'][last_input_idx:last_input_idx+1, :, :]  # [1, S, D]
+                                # Mean pool frame M and frame M-1  
+                                frame_m_minus_1 = predictions['autonomy_features'][cfg.MODEL.M - 1]  # [S, D]
+                                frame_m = predictions['autonomy_features'][cfg.MODEL.M]  # [S, D]
+                                teacher_features['autonomy_features'] = ((frame_m + frame_m_minus_1) / 2.0).unsqueeze(0)  # [1, S, D]
                         
                         # Compute distillation loss
                         if len(teacher_features) > 0:
@@ -2821,6 +2824,19 @@ def train_model(train_config=None, experiment_tracker=None):
                 
                 # Reset running loss
                 running_loss = 0.0
+            
+            # Save distilled ViT every 1000 steps
+            if global_step % 1000 == 0 and global_step != 0 and accelerator.is_main_process and distilled_vit is not None and cfg.MODEL.USE_DISTILLED_VIT:
+                distilled_vit_checkpoint = {
+                    'epoch': epoch,
+                    'global_step': global_step,
+                    'model_state_dict': accelerator.unwrap_model(distilled_vit).state_dict(),
+                    'config': cfg.MODEL.DISTILLED_VIT,
+                    'teacher_model_name': cfg.MODEL.ENCODER_NAME
+                }
+                distilled_vit_path = os.path.join(cfg.OUTPUT.CHECKPOINT_DIR, f'distilled_vit_step_{global_step}.pt')
+                torch.save(distilled_vit_checkpoint, distilled_vit_path)
+                print(f"💾 Distilled ViT saved at step {global_step}: {distilled_vit_path}")
             
             # Synchronize all processes after model saving operations
             if global_step % cfg.LOGGING.SAVE_FREQ == 0 and global_step != 0:

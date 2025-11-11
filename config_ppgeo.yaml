@@ -1,0 +1,63 @@
+# PPGeo Training Configuration
+# Self-supervised depth and pose learning with DinOV3 + DPT
+
+# Dataset parameters (use existing YouTube S3 dataset)
+DATASET:
+  # YouTube S3 dataset configuration  
+  USE_YOUTUBE: True
+  YOUTUBE_ROOT_PREFIX: "openDV-YouTube/full_images/"
+  YOUTUBE_CACHE_DIR: "./youtube_cache"
+  YOUTUBE_REFRESH_CACHE: False
+  YOUTUBE_SKIP_FRAMES: 300
+  YOUTUBE_MIN_SEQUENCE_LENGTH: 50
+  YOUTUBE_MAX_WORKERS: 16
+  MAX_SAMPLES: 10000  # Smaller for initial testing
+  FRAME_SAMPLING_RATE: 5  # 2Hz from 10Hz videos
+  
+  BATCH_SIZE: 8
+  VAL_SPLIT: 0.1
+  
+  # PPGeo image settings
+  IMG_HEIGHT: 160
+  IMG_WIDTH: 320
+
+# Model parameters
+MODEL:
+  ENCODER_NAME: "dinov3"  # Use DinOV3 ViT encoder
+  
+# PPGeo specific parameters
+PPGEO:
+  STAGE: 1  # Stage 1: depth + pose training
+  FRAME_IDS: [-1, 0, 1]  # Previous, current, next frames
+  SCALES: [0, 1, 2, 3]   # Multi-scale loss
+  MIN_DEPTH: 0.1
+  MAX_DEPTH: 100.0
+
+# Training parameters
+TRAINING:
+  NUM_EPOCHS: 30
+  LEARNING_RATE: 1e-4
+  MAX_GRAD_NORM: 1.0
+
+# Loss weights  
+LOSS:
+  PHOTOMETRIC_WEIGHT: 1.0
+  SMOOTHNESS_WEIGHT: 0.001
+  
+# Validation parameters
+VALIDATION:
+  VAL_FREQ: 3  # Validate every N epochs
+
+# Logging parameters
+LOGGING:
+  LOG_FREQ: 50
+
+# Output parameters
+OUTPUT:
+  CHECKPOINT_DIR: "checkpoints_ppgeo"
+
+# W&B parameters
+WANDB:
+  PROJECT: "ppgeo-dinov3"
+  USE_WANDB: True
+  RUN_NAME: "ppgeo-dinov3-dpt-stage1"

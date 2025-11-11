@@ -70,7 +70,7 @@ MODEL:
   USE_FROZEN_DECODER_SUPERVISION: False  # Use frozen model's decoder features as supervision for autoregressive transformer
   
   # Distilled ViT parameters
-  USE_DISTILLED_VIT: False         # Enable distilled ViT training
+  USE_DISTILLED_VIT: True         # Enable distilled ViT training
   DISTILLED_VIT:
     EMBED_DIM: 768                 # Student embedding dimension
     DEPTH: 12                      # Number of transformer layers
@@ -147,7 +147,7 @@ OUTPUT:
   SAVE_SEGMENTATION: False      # Save segmentation files (every 200 steps)
   
   # S3 checkpoint upload
-  UPLOAD_TO_S3: True        # Upload best checkpoints to S3
+  UPLOAD_TO_S3: False        # Upload best checkpoints to S3
   S3_BUCKET: "research-datasets"  # S3 bucket for checkpointts
   S3_PREFIX: "autonomy_checkpoints"  # S3 prefix/folder
 
@@ -155,4 +155,4 @@ OUTPUT:
 WANDB:
   PROJECT: "autonomy-wild" # Weights & Biases project name
   USE_WANDB: True               # Enable Weights & Biases logging
-  RUN_NAME: "matt-pi3-ff-2hz-reg"  # W&B run name (optional)
+  RUN_NAME: "matt-pi3-ff-2hz-reg-distill-l1"  # W&B run name (optional)

@@ -10,6 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import trunc_normal_
 from functools import partial
+import matplotlib.pyplot as plt
+import os
+from sklearn.decomposition import PCA
+import numpy as np
 from copy import deepcopy
 
 from Pi3.pi3.models.dinov2.models.vision_transformer import DinoVisionTransformer
@@ -225,13 +229,15 @@ class DistillationLoss(nn.Module):
                 student_norm = F.normalize(student_feat, dim=-1)  # [B, N, D]
                 teacher_norm = F.normalize(teacher_feat, dim=-1)   # [B, N, D]
 
-
-                
                 # Spatial cosine similarity: dot product along feature dimension
                 spatial_similarity = torch.sum(student_norm * teacher_norm, dim=-1)  # [B, N]
+                cosine_loss = 1.0 - spatial_similarity.mean()
                 
-                # Average across spatial locations
-                loss = 1.0 - spatial_similarity.mean()
+                # Add smooth L1 loss between spatial features (low weight)
+                smooth_l1_loss = F.smooth_l1_loss(student_feat, teacher_feat)
+                
+                # Combine losses (cosine is primary, smooth L1 is auxiliary)
+                loss = cosine_loss + 0.1 * smooth_l1_loss
             else:
                 # Fallback to MSE loss for unknown token types
                 loss = F.mse_loss(student_feat, teacher_feat)
@@ -272,3 +278,97 @@ def create_distilled_vit(
     
     print(f"✅ Created DistilledViT with pretrained {teacher_model_name} backbone")
     return model
+
+
+def visualize_distilled_pca(student_features, 
+                           input_image, 
+                           step,
+                           save_dir = "./distilled_vit_viz"):
+    """
+    Simple PCA visualization of distilled ViT features, saved to disk.
+    
+    Args:
+        student_features: Dict of student features {feature_type: [B, N, D]}
+        input_image: Input image tensor [B, C, H, W] 
+        step: Current training step
+        save_dir: Directory to save visualizations
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Convert input image for display
+    def tensor_to_image(tensor):
+        if tensor.dim() == 4:
+            tensor = tensor[0]  # Take first batch
+        # Denormalize (assumes ImageNet normalization) 
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        if tensor.device.type == 'cuda':
+            mean = mean.cuda()
+            std = std.cuda()
+        tensor = tensor * std + mean
+        tensor = torch.clamp(tensor, 0, 1)
+        return tensor.cpu().numpy().transpose(1, 2, 0)
+    
+    input_img_np = tensor_to_image(input_image)
+    
+    # Create PCA visualization
+    n_features = len(student_features)
+    fig, axes = plt.subplots(1, n_features + 1, figsize=(4 * (n_features + 1), 4))
+    
+    if n_features == 1:
+        axes = [axes] if not isinstance(axes, list) else axes
+    
+    # Show input image
+    axes[0].imshow(input_img_np)
+    axes[0].set_title('Input')
+    axes[0].axis('off')
+    
+    # PCA for each feature type
+    for i, (feature_type, features) in enumerate(student_features.items()):
+        student_feat = features[0]  # [N, D] take first batch
+        
+        # Apply PCA to reduce to 3 components for RGB visualization
+        if student_feat.shape[1] > 3:
+            pca = PCA(n_components=3)
+            pca_features = pca.fit_transform(student_feat.detach().cpu().numpy())  # [N, 3]
+            
+            # Normalize to [0, 1] for RGB
+            pca_min = pca_features.min(axis=0)
+            pca_max = pca_features.max(axis=0)
+            pca_normalized = (pca_features - pca_min) / (pca_max - pca_min + 1e-8)
+        else:
+            pca_normalized = student_feat.detach().cpu().numpy()
+            if pca_normalized.shape[1] < 3:
+                # Pad with zeros if less than 3 channels
+                pad_shape = (pca_normalized.shape[0], 3 - pca_normalized.shape[1])
+                pca_normalized = np.concatenate([pca_normalized, np.zeros(pad_shape)], axis=1)
+        
+        # Try to reshape to spatial grid
+        n_tokens = pca_normalized.shape[0]
+        if n_tokens == 196:  # 14x14
+            spatial_rgb = pca_normalized.reshape(14, 14, 3)
+        elif n_tokens == 256:  # 16x16
+            spatial_rgb = pca_normalized.reshape(16, 16, 3)
+        else:
+            # Find best square arrangement
+            sqrt_n = int(np.sqrt(n_tokens))
+            if sqrt_n * sqrt_n == n_tokens:
+                spatial_rgb = pca_normalized.reshape(sqrt_n, sqrt_n, 3)
+            else:
+                sqrt_n = int(np.sqrt(min(n_tokens, 256)))
+                spatial_rgb = pca_normalized[:sqrt_n*sqrt_n].reshape(sqrt_n, sqrt_n, 3)
+        
+        # Plot PCA RGB visualization
+        axes[i + 1].imshow(spatial_rgb)
+        axes[i + 1].set_title(f'{feature_type.replace("_", " ").title()}\nPCA RGB')
+        axes[i + 1].axis('off')
+    
+    plt.tight_layout()
+    
+    # Save visualization
+    filename = f"distilled_vit_pca_step_{step:06d}.png"
+    filepath = os.path.join(save_dir, filename)
+    plt.savefig(filepath, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"🎨 DistilledViT PCA features saved: {filepath}")
