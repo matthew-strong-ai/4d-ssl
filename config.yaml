@@ -19,6 +19,7 @@ DATASET:
   YOUTUBE_MIN_SEQUENCE_LENGTH: 50 # Minimum frames in video
   YOUTUBE_MAX_WORKERS: 32         # Parallel S3 workers for initial indexing
   MAX_SAMPLES: -1                # Limit dataset to 100 samples for testing (set to -1 for full dataset)
+  FRAME_SAMPLING_RATE: 5         # Sample every Nth frame (1=10Hz, 5=2Hz) from source 10Hz videos
   
   # Old S3 dataset configuration (DISABLED - keeping for reference)  
   # USE_S3: True                    # Use S3 dataset instead of local files
@@ -26,159 +27,6 @@ DATASET:
   S3_SEQUENCE_PREFIXES:           # List of S3 prefixes for image sequences (LEGACY)
     - "autonomy_youtube/sf_day/"
     - "autonomy_youtube/smoky_mountains/"
-    # Major Cities - North America
-    - "autonomy_youtube/New York City 4K - Midtown Manhattan Drive_h264/"
-    - "autonomy_youtube/New York City 4K - Night Drive_h264/"
-    - "autonomy_youtube/Los Angeles 4K - Night Drive_h264/"
-    - "autonomy_youtube/Los Angeles 4K - Sunset Drive - USA_h264/"
-    - "autonomy_youtube/Chicago 4K - Sunset Drive - Driving Downtown_h264/"
-    - "autonomy_youtube/Miami 4K - Night Drive_h264/"
-    - "autonomy_youtube/Miami 4K - Vice City - Driving Downtown_h264/"
-    - "autonomy_youtube/San Francisco 4K - Night Drive_h264/"
-    - "autonomy_youtube/Boston 4K - Skyscraper District - Driving Downtown_h264/"
-    - "autonomy_youtube/Atlanta 4K - Driving Downtown - Georgia USA_h264/"
-    - "autonomy_youtube/Washington DC 4K - Driving Downtown/"
-    - "autonomy_youtube/Philadelphia 4K - Driving Downtown - USA_h264/"
-    - "autonomy_youtube/Seattle 4K - Sunset Drive - USA_h264/"
-    - "autonomy_youtube/Denver 4K - Mile High City - Driving Downtown_h264/"
-    - "autonomy_youtube/Toronto 4K - Sunset Drive - Driving Downtown/"
-    # Major Cities - Europe
-    - "autonomy_youtube/London 4K - West End Drive - Driving Downtown - England_h264/"
-    - "autonomy_youtube/Paris 4K - Classic Paris Streets - Driving Downtown_h264/"
-    - "autonomy_youtube/Rome 4K - Morning Drive - Driving Downtown_h264/"
-    - "autonomy_youtube/Barcelona 4K - Driving Downtown - Mediterranean Metropolis_h264/"
-    - "autonomy_youtube/Madrid 4K - Driving Downtown - Spain_h264/"
-    - "autonomy_youtube/Amsterdam 4K - Morning Drive - Canals & Bicycles_h264/"
-    - "autonomy_youtube/Geneva Switzerland 4K - Driving Downtown_h264/"
-    - "autonomy_youtube/Brussels 4K - Driving Downtown - Europe's Washington DC_h264/"
-    - "autonomy_youtube/Milan Italy 4K - Morning Drive - Driving Downtown_h264/"
-    - "autonomy_youtube/Zurich Switzerland 4K - Sunset Drive/"
-    # Major Cities - Asia
-    - "autonomy_youtube/Tokyo 4K - Driving Downtown - Central Tokyo - Japan/"
-    - "autonomy_youtube/Tokyo 4K - Shibuya Crossing - Driving Downtown/"
-    - "autonomy_youtube/Tokyo 4K - Skyline Expressway Sunrise - Rainbow Bridge - Driving Downtown/"
-    - "autonomy_youtube/Hong Kong 4K - Night Drive - Driving Downtown_h264/"
-    - "autonomy_youtube/Hong Kong 4K - Skyscraper Sunset - Driving Downtown_h264/"
-    - "autonomy_youtube/Singapore 4K - Driving Downtown - Morning Drive/"
-    - "autonomy_youtube/Singapore 4K - Night Drive - Driving Downtown/"
-    - "autonomy_youtube/Bangkok 4K - Driving Downtown - Thailand_h264/"
-    - "autonomy_youtube/Bangkok 4K - Skyline Expressway Sunrise - Driving Downtown_h264/"
-    # Major Cities - Middle East
-    - "autonomy_youtube/Dubai 4K - Night Drive - Desert Metropolis_h264/"
-    - "autonomy_youtube/Dubai 4K - Skyline Expressway Sunrise - Driving Downtown_h264/"
-    - "autonomy_youtube/Istanbul 4K - Driving Downtown - Turkey_h264/"
-    - "autonomy_youtube/Cairo 4K - Driving Downtown - Egypt_h264/"
-    # Major Cities - South America
-    - "autonomy_youtube/Buenos Aires 4K - Driving Downtown - Morning Drive_h264/"
-    - "autonomy_youtube/Rio De Janeiro 4K - Miami Beach of South America_h264/"
-    - "autonomy_youtube/Sao Paulo 4K - Driving Downtown - Brazil_h264/"
-    - "autonomy_youtube/Santiago 4K - Driving Downtown - Chile_h264/"
-    - "autonomy_youtube/Lima 4K - Driving Downtown - Peru_h264/"
-    # Scenic & Resort Towns
-    - "autonomy_youtube/Aspen 4K - Hollywood's Ski Resort - Scenic Drive - USA_h264/"
-    - "autonomy_youtube/Breckenridge 4K - Swiss Alpine Ski Town - Scenic Drive - USA_h264/"
-    - "autonomy_youtube/Jackson Hole 4K - Wyoming's Billionaire Wilderness - Scenic Drive_h264/"
-    - "autonomy_youtube/Park City Utah 4K - Sundance Ski Town - Scenic Drive_h264/"
-    - "autonomy_youtube/Napa Valley 4K - California Vineyards - Scenic Drive_h264/"
-    - "autonomy_youtube/California Wine Country 4K - Scenic Drive_h264/"
-    - "autonomy_youtube/Charleston 4K - Sunset Drive - South Carolina USA_h264/"
-    - "autonomy_youtube/Palm Beach 4K - Mar-a-Lago Billionaire Resort - Scenic Drive_h264/"
-    - "autonomy_youtube/Monaco 4K - Billionaires' Playground - Sunset Drive_h264/"
-    - "autonomy_youtube/Ibiza 4K - Island Road Trip - Scenic Drive_h264/"
-    
-    # Additional North American Cities
-    - "autonomy_youtube/Las Vegas 4K - Sunset Drive_h264/"
-    - "autonomy_youtube/Las Vegas 4K - Midnight Drive_h264/"
-    - "autonomy_youtube/Las Vegas 4K - America's Playground - Skyline Sunrise_h264/"
-    - "autonomy_youtube/Beverly Hills 4K - Driving Downtown - USA_h264/"
-    - "autonomy_youtube/Hollywood 4K - Night Drive_h264/"
-    - "autonomy_youtube/Brooklyn 4K - Night Drive_h264/"
-    - "autonomy_youtube/Boston 4K - Night Drive - USA_h264/"
-    - "autonomy_youtube/Boston 4K - Winter Weekend Drive_h264/"
-    - "autonomy_youtube/Charlotte 4K - Driving Downtown - North Carolina USA_h264/"
-    - "autonomy_youtube/Austin 4K - Downtown Skyscraper Drive - USA_h264/"
-    - "autonomy_youtube/Orlando 4K - Night Drive_h264/"
-    - "autonomy_youtube/Salt Lake City 4K - Night Drive - USA_h264/"
-    - "autonomy_youtube/New York City 4K - Brooklyn Skyscraper Drive_h264/"
-    - "autonomy_youtube/New York City 4K - Skyline Highway Drive_h264/"
-    - "autonomy_youtube/New York City 4K - Sunset Drive_h264/"
-    - "autonomy_youtube/Chicago 8K 360° Video - Virtual Reality - Driving Downtown_h264/"
-    - "autonomy_youtube/Chicago 4K - Chicago's Main Street - Driving Downtown - The Magnificent Mile_h264/"
-    - "autonomy_youtube/Philadelphia 4K - Winter Night Drive_h264/"
-    - "autonomy_youtube/Washington DC 4K - Sunset Drive/"
-    - "autonomy_youtube/Atlantic City 4K - Driving Downtown - Little Las Vegas_h264/"
-    
-    # Additional European Cities
-    - "autonomy_youtube/London 4K - Royal Kensington - Driving Downtown_h264/"
-    - "autonomy_youtube/Madrid 4K - Night Drive - Spain_h264/"
-    - "autonomy_youtube/Rome 4K - Night Drive_h264/"
-    - "autonomy_youtube/Istanbul 4K - Night Drive - Turkey_h264/"
-    - "autonomy_youtube/Istanbul Turkey 4K - Coastal Night Drive_h264/"
-    - "autonomy_youtube/Basel Switzerland 4K - Morning Drive - Driving Downtown_h264/"
-    - "autonomy_youtube/Ibiza Spain 4K - Driving Downtown - Night Drive_h264/"
-    
-    # Additional Asian Cities
-    - "autonomy_youtube/Tokyo 4K - Beverly Hills of Japan - Driving Downtown - Ginza/"
-    - "autonomy_youtube/Tokyo 4K - Classic Tokyo Neighborhood - Japan/"
-    - "autonomy_youtube/Tokyo 4K - 2020 Olympics Host - Driving Downtown/"
-    - "autonomy_youtube/Tokyo 4K - Driving Downtown - Japan 東京 日本/"
-    - "autonomy_youtube/Tokyo 4K - Skyscraper District - Morning Drive - Shinjuku/"
-    - "autonomy_youtube/Hong Kong 4K - Morning Drive - Protests Aftermath_h264/"
-    - "autonomy_youtube/Hong Kong 4K - Morning Skyline Views - Driving Downtown_h264/"
-    - "autonomy_youtube/Bangkok 4K - Driving Downtown - World's #1 Visited City_h264/"
-    - "autonomy_youtube/Singapore 4K - Skyscraper District - Sunset Drive/"
-    
-    # Additional Middle East Cities
-    - "autonomy_youtube/Dubai 4K - Driving Downtown - Skyscraper Sunset_h264/"
-    - "autonomy_youtube/Dubai 4K - Miami of the Middle East - Morning Drive_h264/"
-    - "autonomy_youtube/Cairo 4K - Night Drive - Driving Downtown_h264/"
-    - "autonomy_youtube/Cairo 4K - Pyramid Expressway Sunrise - Scenic Drive_h264/"
-    - "autonomy_youtube/Cairo Egypt 4K - Rush Hour - Driving Downtown_h264/"
-    
-    # Additional South American Cities
-    - "autonomy_youtube/Buenos Aires 4K - Night Drive - Driving Downtown_h264/"
-    - "autonomy_youtube/Rio 4K - City Center - Night Drive_h264/"
-    - "autonomy_youtube/Rio 4K - Copacabana Beach - Morning Drive_h264/"
-    - "autonomy_youtube/Rio De Janeiro 4K - 2AM Airport Drive - Brazil_h264/"
-    - "autonomy_youtube/Sao Paulo 4K - City Sunrise - Driving Downtown - Brazil_h264/"
-    - "autonomy_youtube/Sao Paulo 4K - Modern City Center - Driving Downtown - Brazil_h264/"
-    - "autonomy_youtube/Sao Paulo 4K - Night Drive_h264/"
-    - "autonomy_youtube/Santiago 4K - Sunset Drive - Chile_h264/"
-    - "autonomy_youtube/Lima 4K - Malibu and Santa Monica in South America - Peru_h264/"
-    
-    # Scenic Drives & National Parks
-    - "autonomy_youtube/California Coast 4K - Scenic Drive_h264/"
-    - "autonomy_youtube/California Coast 4K - Sunset Drive - Big Sur_h264/"
-    - "autonomy_youtube/Los Angeles 4K - Pacific Coast Highway - Scenic Drive_h264/"
-    - "autonomy_youtube/San Francisco 4K - Pacific Coast Highway - Scenic Drive_h264/"
-    - "autonomy_youtube/Malibu 4K - Sunset Drive - Billionaire's Beach_h264/"
-    - "autonomy_youtube/Malibu 4K - Ferrari F8 Spider 2021 - Scenic Drive_h264/"
-    - "autonomy_youtube/Malibu 4K - Mountains & Canyons - Ferrari F8 Spider 2021 - Scenic Drive_h264/"
-    - "autonomy_youtube/Florida Keys 4K - Tropical Islands - Scenic Drive_h264/"
-    - "autonomy_youtube/Florida 4K - Sunshine Skyway - Scenic Drive_h264/"
-    - "autonomy_youtube/Gulf Coast 4K - Scenic Drive - Coastal Sunrise_h264/"
-    - "autonomy_youtube/Daytona Beach 4K - Scenic Drive_h264/"
-    - "autonomy_youtube/Italian Riviera 4K - Yachts & Seaside Resorts - Scenic Drive_h264/"
-    - "autonomy_youtube/Arches National Park 4K - Scenic Drive - Utah USA_h264/"
-    - "autonomy_youtube/Arches National Park 4K - Winter Sunrise - Scenic Drive - USA_h264/"
-    - "autonomy_youtube/Bryce Canyon National Park 4K - Scenic Drive - Utah USA_h264/"
-    - "autonomy_youtube/Grand Teton National Park 4K - Scenic Drive - Wyoming USA_h264/"
-    - "autonomy_youtube/Zion National Park 4K - Scenic Drive - Utah USA_h264/"
-    - "autonomy_youtube/Utah 4K - Desert Snow - Scenic Drive - USA_h264/"
-    - "autonomy_youtube/USA Ski Country 4K - Colorado Scenic Drive/"
-    - "autonomy_youtube/Texas 4K - Sunrise Drive - Scenic Drive - USA/"
-    
-    # Night Drives & Special Conditions
-    - "autonomy_youtube/Los Angeles 4K - Ferrari F8 Spider 2021 - Night Drive_h264/"
-    - "autonomy_youtube/Miami Beach 4K - Driving Downtown - Morning Drive_h264/"
-    - "autonomy_youtube/Miami 4K - Gold Coast - Scenic Drive_h264/"
-    - "autonomy_youtube/Miami 4K - Singapore Of The US - Sunset Drive_h264/"
-    - "autonomy_youtube/Tampa 4K - Night Drive/"
-    - "autonomy_youtube/Los Angeles 4K - Central Park_h264/"
-    - "autonomy_youtube/Los Angeles 4K - Skyscraper Metropolis - Wilshire Boulevard_h264/"
-    - "autonomy_youtube/New Orleans 4K - World's Longest Bridge - Lake Pontchartrain Causeway_h264/"
-    
-    # Note: test.txt is also in the bucket but not a video sequence
 
   S3_IMAGE_EXTENSION: ".png"      # Image file extension in S3 (LEGACY)
   S3_REGION: "us-phoenix-1"      # Oracle Cloud region for YouTube dataset
@@ -186,11 +34,12 @@ DATASET:
   
   BATCH_SIZE: 1                   # Batch size for training (increased for YouTube scale)
   VAL_SPLIT: 0.05                # Fraction of data to use for validation (smaller for huge dataset)
+  
 
 # Model parameters  
 MODEL:
-  M: 5                          # Number of input frames
-  N: 1                           # Number of target frames
+  M: 3                         # Number of input frames
+  N: 3                           # Number of target frames
   GRID_SIZE: 10                  # Grid size for query points1
   ENCODER_NAME: "dinov2"         # Encoder type: "dinov2" or "dinov3"
   ARCHITECTURE: "AutoregressivePi3"    # Model architecture: "AutonomyPi3" or "AutoregressivePi3"
@@ -213,15 +62,38 @@ MODEL:
   DETR_NUM_LAYERS: 6            # Number of DETR decoder layers
 
   USE_MOTION_HEAD: False    # Enable optional motion prediction head for point motion estimation
-  USE_SEGMENTATION_HEAD: True    # Enable optional segmentation head for per-pixel segmentation
-  # USE_ROAD_SEGMENTATION: True   # Enable road segmentation using pretrained SegFormer
-  # ROAD_AS_SEPARATE_CLASS: True  # Treat road as class 6 (or merge with background)
+  USE_FLOW_HEAD: False      # Enable optional optical flow prediction head for 2D flow estimation
+  USE_SEGMENTATION_HEAD: False    # Enable optional segmentation head for per-pixel segmentation
+  SEGMENTATION_MODEL: "gsam2"    # Segmentation model: "gsam2", "segformer", "deeplabv3"
+  SEGMENTATION_NUM_CLASSES: 6    # Number of segmentation classes (6 for GSAM2, 7 for Cityscapes)
   FREEZE_DECODERS: True    # Freeze point, conf, and camera decoders/heads to improve token representations
   USE_FROZEN_DECODER_SUPERVISION: False  # Use frozen model's decoder features as supervision for autoregressive transformer
+  
+  # Distilled ViT parameters
+  USE_DISTILLED_VIT: False         # Enable distilled ViT training
+  DISTILLED_VIT:
+    EMBED_DIM: 768                 # Student embedding dimension
+    DEPTH: 12                      # Number of transformer layers
+    NUM_HEADS: 12                  # Number of attention heads
+    DISTILL_TOKENS: ['point_features', 'camera_features', 'autonomy_features']  # Features to distill
+    TEMPERATURE: 4.0               # Distillation temperature
+    USE_COSINE_SIMILARITY: True    # Use cosine similarity loss
 
 
-POINT_MOTION:
-  TRAIN_MOTION: False
+POINT_MOTION: 
+  TRAIN_MOTION: False    # Enable motion ground truth computation using CoTracker3
+  MOTION_THRESHOLD: 0.1  # Threshold for converting motion magnitude to binary mask (meters)
+
+# Motion Detection parameters (using optical flow)
+MOTION_DETECTION:
+  ENABLE: False                    # Enable flow-based motion detection
+  MOTION_THRESHOLD: 0.1           # 3D motion threshold in meters per frame
+  TEMPORAL_WINDOW: 5              # Number of frames for object motion classification
+  CONSISTENCY_THRESHOLD: 0.6      # Fraction of frames that must be dynamic for classification
+  CAMERA_MOTION_COMPENSATION: True # Remove camera motion from object motion
+  SAVE_MOTION_VISUALIZATIONS: True # Save motion field and dynamic object visualizations
+  MAX_MOTION_DISPLAY: 1.0         # Maximum motion magnitude for visualization scaling
+  VISUALIZATION_SUBSAMPLE: 16     # Arrow plot subsampling factor
 
 # GroundingDINO Detection parameters
 DETECTION:
@@ -248,10 +120,11 @@ LOSS:
   POSE_LOSS_WEIGHT: 0.1         # Camera pose loss weight
   CONF_LOSS_WEIGHT: 0.05         # Confidence loss weight
   SEGMENTATION_LOSS_WEIGHT: 1.0   # Segmentation loss weight (GroundingDINO supervision)
-  NORMAL_LOSS_WEIGHT: 30.0       # Normal loss weight (0.0 disables it)
+  NORMAL_LOSS_WEIGHT: 10.0       # Normal loss weight (0.0 disables it)
   DETECTION_LOSS_WEIGHT: 0.0     # Detection loss weight (GroundingDINO supervision, 0.0 disables it)
-  FUTURE_FRAME_WEIGHT:   0.0      # Weight multiplier for future frame supervision (>1.0 emphasizes future frames, 0.0 = current frames only)
+  FUTURE_FRAME_WEIGHT:   10.0      # Weight multiplier for future frame supervision (>1.0 emphasizes future frames, 0.0 = current frames only)
   MOTION_LOSS_WEIGHT: 1.0         # Motion loss weight (0.0 disables it)
+  FLOW_LOSS_WEIGHT: 0.1           # Optical flow loss weight (0.0 disables it)
   FROZEN_DECODER_SUPERVISION_WEIGHT: 0.0  # Weight for frozen model decoder supervision loss
 
 # Validation parameters
@@ -271,10 +144,10 @@ OUTPUT:
   CHECKPOINT_DIR: "checkpoints"  # Directory to save checkpoints
   SAVE_NPZ: False               # Save npz files  
   SAVE_DEPTHS: True             # Save depths files (every 200 steps)
-  SAVE_SEGMENTATION: True      # Save segmentation files (every 200 steps)
+  SAVE_SEGMENTATION: False      # Save segmentation files (every 200 steps)
   
   # S3 checkpoint upload
-  UPLOAD_TO_S3: False        # Upload best checkpoints to S3
+  UPLOAD_TO_S3: True        # Upload best checkpoints to S3
   S3_BUCKET: "research-datasets"  # S3 bucket for checkpointts
   S3_PREFIX: "autonomy_checkpoints"  # S3 prefix/folder
 
@@ -282,4 +155,4 @@ OUTPUT:
 WANDB:
   PROJECT: "autonomy-wild" # Weights & Biases project name
   USE_WANDB: True               # Enable Weights & Biases logging
-  RUN_NAME: "matt-segmentation-prediction"  # W&B run name (optional)
+  RUN_NAME: "matt-pi3-ff-2hz-reg"  # W&B run name (optional)

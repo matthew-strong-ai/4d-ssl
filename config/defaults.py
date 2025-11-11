@@ -30,6 +30,7 @@ _C.DATASET.YOUTUBE_SKIP_FRAMES = 300        # Skip first N frames per video
 _C.DATASET.YOUTUBE_MIN_SEQUENCE_LENGTH = 50 # Minimum video length
 _C.DATASET.YOUTUBE_MAX_WORKERS = 8          # Parallel workers for S3 indexing
 _C.DATASET.MAX_SAMPLES = -1                 # Limit dataset size (-1 for all samples)
+_C.DATASET.FRAME_SAMPLING_RATE = 1         # Sample every Nth frame (1=10Hz, 5=2Hz) from source 10Hz videos
 
 _C.DATASET.BATCH_SIZE = 20                  # Batch size for training
 _C.DATASET.VAL_SPLIT = 0.1                 # Fraction of data to use for validation
@@ -47,6 +48,17 @@ _C.MODEL.AR_N_HEADS = 16                   # Number of attention heads for autor
 _C.MODEL.AR_N_LAYERS = 8                   # Number of layers for autoregressive transformer
 _C.MODEL.AR_DROPOUT = 0.1                  # Dropout rate for autoregressive transformer
 
+# Distilled ViT parameters
+_C.MODEL.USE_DISTILLED_VIT = False         # Enable distilled ViT training
+_C.MODEL.DISTILLED_VIT = CN()
+_C.MODEL.DISTILLED_VIT.EMBED_DIM = 768     # Student embedding dimension
+_C.MODEL.DISTILLED_VIT.DEPTH = 12          # Number of transformer layers
+_C.MODEL.DISTILLED_VIT.NUM_HEADS = 12      # Number of attention heads
+_C.MODEL.DISTILLED_VIT.DISTILL_TOKENS = ['point_features', 'camera_features', 'autonomy_features']  # Features to distill
+_C.MODEL.DISTILLED_VIT.TEMPERATURE = 4.0   # Distillation temperature
+_C.MODEL.DISTILLED_VIT.USE_COSINE_SIMILARITY = True  # Use cosine similarity loss
+_C.MODEL.DISTILLED_VIT.LOAD_PRETRAINED = True  # Load pretrained DINOv2 weights for initialization
+
 _C.MODEL.USE_DETECTION_HEAD = False        # Enable optional detection head for traffic lights/road signs
 _C.MODEL.NUM_DETECTION_CLASSES = 2         # Number of detection classes (traffic light, road sign)
 
@@ -57,8 +69,9 @@ _C.MODEL.DETR_HIDDEN_DIM = 256             # DETR decoder hidden dimension
 _C.MODEL.DETR_NUM_HEADS = 8                # Number of attention heads in DETR decoder
 _C.MODEL.DETR_NUM_LAYERS = 6               # Number of DETR decoder layers
 _C.MODEL.USE_MOTION_HEAD = False           # Enable motion head
+_C.MODEL.USE_FLOW_HEAD = False             # Enable optical flow head
 _C.MODEL.USE_SEGMENTATION_HEAD = True       # Enable segmentation head
-_C.MODEL.SEGMENTATION_MODEL = "segformer"   # Segmentation model: "gsam2", "segformer", "deeplabv3"
+_C.MODEL.SEGMENTATION_MODEL = "gsam2"   # Segmentation model: "gsam2", "segformer", "deeplabv3"
 _C.MODEL.SEGMENTATION_NUM_CLASSES = 7       # Number of segmentation classes (7 for Cityscapes, 6 for GSAM2)
 _C.MODEL.FREEZE_DECODERS = False            # Freeze point, conf, and camera decoders/heads
 _C.MODEL.USE_FROZEN_DECODER_SUPERVISION = False  # Use frozen model's decoder features as supervision for autoregressive transformer
@@ -87,6 +100,18 @@ _C.MODEL.MAPANYTHING.RESOLUTION = 518                         # Input resolution
 
 _C.POINT_MOTION = CN()
 _C.POINT_MOTION.TRAIN_MOTION = False       # Train point motion prediction head
+_C.POINT_MOTION.MOTION_THRESHOLD = 0.1     # Threshold for converting motion magnitude to binary mask (meters)
+
+# Motion Detection parameters (using optical flow)
+_C.MOTION_DETECTION = CN()
+_C.MOTION_DETECTION.ENABLE = False                    # Enable flow-based motion detection
+_C.MOTION_DETECTION.MOTION_THRESHOLD = 0.1           # 3D motion threshold in meters per frame
+_C.MOTION_DETECTION.TEMPORAL_WINDOW = 5              # Number of frames for object motion classification
+_C.MOTION_DETECTION.CONSISTENCY_THRESHOLD = 0.6      # Fraction of frames that must be dynamic for classification
+_C.MOTION_DETECTION.CAMERA_MOTION_COMPENSATION = True # Remove camera motion from object motion
+_C.MOTION_DETECTION.SAVE_MOTION_VISUALIZATIONS = True # Save motion field and dynamic object visualizations
+_C.MOTION_DETECTION.MAX_MOTION_DISPLAY = 1.0         # Maximum motion magnitude for visualization scaling
+_C.MOTION_DETECTION.VISUALIZATION_SUBSAMPLE = 16     # Arrow plot subsampling factor
 
 # GroundingDINO Detection parameters
 _C.DETECTION = CN()
@@ -118,8 +143,13 @@ _C.LOSS.DETECTION_LOSS_WEIGHT = 0.0       # Detection loss weight (GroundingDINO
 _C.LOSS.SEGMENTATION_LOSS_WEIGHT = 0.1     # Segmentation loss weight (composite mask supervision)
 _C.LOSS.SEGMENTATION_USE_FOCAL_LOSS = True  # Use focal loss for class imbalance (vs weighted CE)
 _C.LOSS.MOTION_LOSS_WEIGHT = 0.1           # Motion loss weight (3D motion vector supervision)
+_C.LOSS.FLOW_LOSS_WEIGHT = 0.1             # Optical flow loss weight (2D flow supervision)
 _C.LOSS.FUTURE_FRAME_WEIGHT = 1.0         # Weight multiplier for future frame supervision
 _C.LOSS.FROZEN_DECODER_SUPERVISION_WEIGHT = 1.0  # Weight for frozen model decoder supervision loss
+_C.LOSS.DISTILLATION_LOSS_WEIGHT = 1.0        # Weight for distilled ViT loss
+_C.LOSS.DISTILLATION_POINT_FEATURES_WEIGHT = 1.0   # Weight for point_features distillation
+_C.LOSS.DISTILLATION_CAMERA_FEATURES_WEIGHT = 1.0  # Weight for camera_features distillation
+_C.LOSS.DISTILLATION_AUTONOMY_FEATURES_WEIGHT = 1.0 # Weight for autonomy_features distillation
 
 # Confidence-weighted point loss parameters
 _C.LOSS.USE_CONF_WEIGHTED_POINTS = True  # Use confidence-weighted point loss instead of scale-invariant loss

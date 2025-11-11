@@ -24,6 +24,12 @@ import nest_asyncio
 # Allow nested event loops (needed for Jupyter/DataLoader compatibility)
 nest_asyncio.apply()
 
+# from .youtube_shard_dataset import YouTubeVideoDataset
+import torch.nn.functional as F
+
+
+YOUTUBE_S3_CACHE = 'youtube_cache/youtube_dataset_df7b4701e6ade36698417531f6d163f2.pkl'
+
 
 class YouTubeS3Dataset(Dataset):
     """
@@ -58,7 +64,8 @@ class YouTubeS3Dataset(Dataset):
         skip_frames: int = 0,  # Skip first N frames of each video
         max_workers: int = 8,  # For parallel S3 operations
         verbose: bool = True,
-        use_async: bool = False  # Use async I/O for frame loading
+        use_async: bool = False,  # Use async I/O for frame loading
+        frame_sampling_rate: int = 1  # Sample every Nth frame (1=10Hz, 5=2Hz)
     ):
         """
         Args:
@@ -75,6 +82,7 @@ class YouTubeS3Dataset(Dataset):
             max_workers: Number of parallel workers for S3 operations
             verbose: Print detailed progress
             use_async: Use async I/O for frame loading (faster for many concurrent downloads)
+            frame_sampling_rate: Sample every Nth frame (1=all frames/10Hz, 5=every 5th/2Hz)
         """
         self.bucket_name = bucket_name
         self.root_prefix = root_prefix.rstrip('/') + '/'
@@ -85,11 +93,14 @@ class YouTubeS3Dataset(Dataset):
         self.region_name = region_name
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.min_sequence_length = max(min_sequence_length, self.total_frames + skip_frames)
+        # Adjust minimum sequence length based on sampling rate
+        frames_needed = (self.total_frames - 1) * frame_sampling_rate + 1 + skip_frames
+        self.min_sequence_length = max(min_sequence_length, frames_needed)
         self.skip_frames = skip_frames
         self.max_workers = max_workers
         self.verbose = verbose
         self.use_async = use_async
+        self.frame_sampling_rate = frame_sampling_rate
         
         # Initialize background caching system
         self.enable_background_cache = True
@@ -169,6 +180,8 @@ class YouTubeS3Dataset(Dataset):
             print(f"   Background RAM cache: {cache_usage:.1f}MB / {self.max_cache_size_mb}MB")
             print(f"   Frame loading mode: {'Async I/O' if self.use_async else f'ThreadPool ({self.max_workers} workers)'}")
             print(f"   RAM cache: {self.max_cache_size_mb}MB")
+            if self.frame_sampling_rate > 1:
+                print(f"   Frame sampling: every {self.frame_sampling_rate} frames ({10.0/self.frame_sampling_rate:.1f} Hz)")
     
     def _default_transform(self):
         """Default transform if none provided"""
@@ -179,14 +192,34 @@ class YouTubeS3Dataset(Dataset):
     
     def _get_cache_path(self) -> Path:
         """Generate cache file path based on dataset parameters"""
+        # print parts that make up the cache key
+        print(f"Generating cache key with:")
+        print(f"   Bucket: {self.bucket_name}")
+        print(f"   Root Prefix: {self.root_prefix}")
+        print(f"   Min Sequence Length: {self.min_sequence_length}")
+        print(f"   Skip Frames: {self.skip_frames}")
         cache_key = hashlib.md5(
             f"{self.bucket_name}_{self.root_prefix}_{self.min_sequence_length}_{self.skip_frames}".encode()
         ).hexdigest()
+
         return self.cache_dir / f"youtube_dataset_{cache_key}.pkl"
     
     def _build_dataset_index(self, refresh_cache: bool) -> List[Dict]:
         """Build or load the dataset index"""
+
         cache_path = self._get_cache_path()
+        print(cache_path)
+        
+        # Also check if the hardcoded cache file exists
+        hardcoded_cache_path = Path(YOUTUBE_S3_CACHE)
+        if not refresh_cache and hardcoded_cache_path.exists():
+            if self.verbose:
+                print(f"📁 Found hardcoded cache file: {YOUTUBE_S3_CACHE}")
+                print(f"📁 Loading dataset index from: {hardcoded_cache_path}")
+            with open(hardcoded_cache_path, 'rb') as f:
+                sequences = pickle.load(f)
+            print(f"✅ Loaded {len(sequences)} sequences from hardcoded cache")
+            return sequences
         
         # Try to load from cache
         if not refresh_cache and cache_path.exists():
@@ -281,10 +314,12 @@ class YouTubeS3Dataset(Dataset):
             video_prefix = f"{channel_prefix}{video}/"
             frames = self._get_video_frames(video_prefix)
             
-            if len(frames) >= self.min_sequence_length:
+            # Adjust minimum sequence length for frame sampling
+            frames_needed = self.skip_frames + (self.total_frames - 1) * self.frame_sampling_rate + 1
+            if len(frames) >= frames_needed:
                 # Skip first N frames and create sequence entry
                 valid_frames = frames[self.skip_frames:]
-                if len(valid_frames) >= self.total_frames:
+                if len(valid_frames) >= (self.total_frames - 1) * self.frame_sampling_rate + 1:
                     channel_sequences.append({
                         'channel': channel,
                         'video': video,
@@ -652,10 +687,16 @@ class YouTubeS3Dataset(Dataset):
         return dict(stats)
     
     def __len__(self) -> int:
-        """Total number of possible consecutive sequences"""
+        """Total number of possible sequences accounting for frame sampling"""
         total = 0
         for seq in self.sequences:
-            total += len(seq['frames']) - self.total_frames + 1
+            # Account for frame sampling rate
+            frames_needed = (self.total_frames - 1) * self.frame_sampling_rate + 1
+            available_frames = len(seq['frames'])
+            if available_frames >= frames_needed:
+                # Number of valid starting positions when sampling
+                valid_positions = available_frames - frames_needed + 1
+                total += valid_positions
         return total
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
@@ -670,60 +711,75 @@ class YouTubeS3Dataset(Dataset):
         # Find which sequence this index belongs to
         current_idx = 0
         for seq in self.sequences:
-            seq_length = len(seq['frames']) - self.total_frames + 1
-            if idx < current_idx + seq_length:
-                # Found the sequence
-                local_idx = idx - current_idx
-                frames_to_load = seq['frames'][local_idx:local_idx + self.total_frames]
-                
-                # Queue next frames for background prefetching
-                # next_frames = self._predict_next_frames(seq, local_idx)
-                # if next_frames:
-                #     self._queue_for_prefetch(next_frames)
-                
-                # Load frames in parallel or async
-                if self.use_async:
-                    loaded_frames = self._load_frames_async(frames_to_load)
-                else:
-                    loaded_frames = self._load_frames_parallel(frames_to_load)
-                
-                # Stack frames
-                # go through every frame and make sure they are size 294 by 518
-                expected_shape = (3, 294, 518)  # (C, H, W)
-                
-                for i, frame in enumerate(loaded_frames):
-                    if frame.shape != expected_shape:
-                        print(f"Warning: Frame {i} has shape {frame.shape}, expected {expected_shape}")
-                        # Resize to correct shape if needed
-                        if frame.dim() == 3 and frame.shape[0] == 3:
-                            # Interpolate to correct height and width
-                            frame = torch.nn.functional.interpolate(
-                                frame.unsqueeze(0),  # Add batch dimension
-                                size=(294, 518),  # (H, W)
-                                mode='bilinear',
-                                align_corners=False
-                            ).squeeze(0)  # Remove batch dimension
-                            loaded_frames[i] = frame
-                        else:
-                            # If completely wrong shape, replace with black frame
-                            print(f"Error: Frame {i} has invalid shape {frame.shape}, replacing with black frame")
-                            loaded_frames[i] = torch.zeros(expected_shape)
-                
-                all_frames = torch.stack(loaded_frames)
-                current_frames = all_frames[:self.m]
-                future_frames = all_frames[self.m:]
-                
-                # Metadata
-                metadata = {
-                    'channel': seq['channel'],
-                    'video': seq['video'],
-                    'start_frame_idx': local_idx,
-                    'frame_paths': frames_to_load
-                }
-                
-                return current_frames, future_frames, metadata
+            # Account for frame sampling when calculating sequence length
+            frames_needed = (self.total_frames - 1) * self.frame_sampling_rate + 1
+            available_frames = len(seq['frames'])
             
-            current_idx += seq_length
+            if available_frames >= frames_needed:
+                valid_positions = available_frames - frames_needed + 1
+                
+                if idx < current_idx + valid_positions:
+                    # Found the sequence
+                    local_idx = idx - current_idx
+                    
+                    # Sample frames at the specified rate
+                    frame_indices = [local_idx + i * self.frame_sampling_rate 
+                                   for i in range(self.total_frames)]
+                    frames_to_load = [seq['frames'][idx] for idx in frame_indices]
+                    
+                    # Queue next frames for background prefetching
+                    # next_frames = self._predict_next_frames(seq, local_idx)
+                    # if next_frames:
+                    #     self._queue_for_prefetch(next_frames)
+                    
+                    # Load frames in parallel or async
+                    if self.use_async:
+                        loaded_frames = self._load_frames_async(frames_to_load)
+                    else:
+                        loaded_frames = self._load_frames_parallel(frames_to_load)
+                    
+                    # Stack frames
+                    # go through every frame and make sure they are size 294 by 518
+                    expected_shape = (3, 294, 518)  # (C, H, W)
+                    
+                    for i, frame in enumerate(loaded_frames):
+                        if frame.shape != expected_shape:
+                            print(f"Warning: Frame {i} has shape {frame.shape}, expected {expected_shape}")
+                            # Resize to correct shape if needed
+                            if frame.dim() == 3 and frame.shape[0] == 3:
+                                # Interpolate to correct height and width
+                                frame = torch.nn.functional.interpolate(
+                                    frame.unsqueeze(0),  # Add batch dimension
+                                    size=(294, 518),  # (H, W)
+                                    mode='bilinear',
+                                    align_corners=False
+                                ).squeeze(0)  # Remove batch dimension
+                                loaded_frames[i] = frame
+                            else:
+                                # If completely wrong shape, replace with black frame
+                                print(f"Error: Frame {i} has invalid shape {frame.shape}, replacing with black frame")
+                                loaded_frames[i] = torch.zeros(expected_shape)
+                    
+                    all_frames = torch.stack(loaded_frames)
+                    current_frames = all_frames[:self.m]
+                    future_frames = all_frames[self.m:]
+                    
+                    # Metadata
+                    metadata = {
+                        'channel': seq['channel'],
+                        'video': seq['video'],
+                        'start_frame_idx': local_idx,
+                        'frame_paths': frames_to_load,
+                        'frame_sampling_rate': self.frame_sampling_rate,
+                        'effective_fps': 10.0 / self.frame_sampling_rate  # Original is 10Hz
+                    }
+                    
+                    return current_frames, future_frames, metadata
+                
+                current_idx += valid_positions
+            else:
+                # Skip sequences that don't have enough frames for sampling
+                continue
         
         raise IndexError(f"Index {idx} out of range for dataset with size {len(self)}")
     
@@ -782,6 +838,9 @@ class YouTubeS3Dataset(Dataset):
         print(f"   - Average frames per video: {sum(video_stats.values()) / len(video_stats):.1f}")
         print(f"   - Total frames: {sum(video_stats.values())}")
         print(f"   - Sequence length (M+N): {self.total_frames}")
+        print(f"   - Frame sampling rate: {self.frame_sampling_rate} (every {self.frame_sampling_rate} frames)")
+        print(f"   - Effective FPS: {10.0/self.frame_sampling_rate:.1f} Hz (from 10Hz source)")
+        print(f"   - Temporal span per sequence: {(self.total_frames - 1) * self.frame_sampling_rate / 10.0:.1f}s")
         print("="*60 + "\n")
 
 
@@ -791,8 +850,8 @@ if __name__ == "__main__":
     dataset = YouTubeS3Dataset(
         bucket_name="research-datasets",
         root_prefix="openDV-YouTube/full_images/",
-        m=3,
-        n=3,
+        m=10,
+        n=0,
         cache_dir="./youtube_cache",
         refresh_cache=False,  # Set to True to rebuild cache
         skip_frames=300,  # Skip first 300 frames like the original dataset
@@ -808,3 +867,131 @@ if __name__ == "__main__":
     print(f"   Loaded sequence from: {metadata['channel']}/{metadata['video']}")
     print(f"   Current frames shape: {current.shape}")
     print(f"   Future frames shape: {future.shape}")
+
+
+# class YouTubeShardDatasetWrapper:
+#     """
+#     Wrapper to make YouTubeVideoDataset (IterableDataset) compatible with existing training code.
+#     Handles frame preprocessing, target generation, and batching.
+#     """
+    
+#     def __init__(
+#         self,
+#         s3_path: str,
+#         m: int = 3,
+#         n: int = 3,
+#         target_width: int = 518,
+#         target_height: int = 294,
+#         max_shards: Optional[int] = None,
+#         transform: Optional[T.Compose] = None
+#     ):
+#         """
+#         Args:
+#             s3_path: S3 path to sharded dataset
+#             m: Number of input frames
+#             n: Number of target frames
+#             target_width: Target width for frames
+#             target_height: Target height for frames
+#             max_shards: Optional limit on number of shards
+#             transform: Optional transform to apply to frames
+#         """
+#         self.m = m
+#         self.n = n
+#         self.target_width = target_width
+#         self.target_height = target_height
+#         self.total_frames = m + n
+        
+#         # Create the underlying iterable dataset
+#         self.dataset = YouTubeVideoDataset(s3_path=s3_path, max_shards=max_shards)
+        
+#         # Default transform if none provided
+#         self.transform = transform or T.Compose([
+#             T.Resize((target_height, target_width)),
+#             T.ToTensor(),
+#         ])
+    
+#     def _preprocess_frames(self, frames: torch.Tensor) -> torch.Tensor:
+#         """
+#         Preprocess frames from uint8 [seq_len, H, W, C] to float32 [seq_len, C, H, W].
+        
+#         Args:
+#             frames: Tensor of shape [seq_len, H, W, C] with dtype uint8
+            
+#         Returns:
+#             Tensor of shape [seq_len, C, H, W] with dtype float32, normalized to [0, 1]
+#         """
+#         # Convert to float and normalize to [0, 1]
+#         frames_float = frames.float() / 255.0
+        
+#         # Rearrange from [seq_len, H, W, C] to [seq_len, C, H, W]
+#         frames_processed = frames_float.permute(0, 3, 1, 2)
+        
+#         # Resize to target dimensions if needed
+#         seq_len, C, H, W = frames_processed.shape
+#         if H != self.target_height or W != self.target_width:
+#             frames_processed = F.interpolate(
+#                 frames_processed,
+#                 size=(self.target_height, self.target_width),
+#                 mode='bilinear',
+#                 align_corners=False
+#             )
+        
+#         return frames_processed
+    
+#     def _create_sliding_window_sequences(self, frames: torch.Tensor, metadata: Dict) -> List[Tuple]:
+#         """
+#         Create multiple overlapping sequences from a video using sliding window.
+        
+#         Args:
+#             frames: Preprocessed frames [seq_len, C, H, W]
+#             metadata: Metadata dict for the video
+            
+#         Returns:
+#             List of (current_frames, future_frames, metadata) tuples
+#         """
+#         sequences = []
+#         seq_len = frames.shape[0]
+        
+#         # Create sliding window sequences
+#         for start_idx in range(seq_len - self.total_frames + 1):
+#             window_frames = frames[start_idx:start_idx + self.total_frames]
+            
+#             current_frames = window_frames[:self.m]
+#             future_frames = window_frames[self.m:]
+            
+#             # Create metadata for this sequence
+#             seq_metadata = {
+#                 **metadata,
+#                 'start_frame_idx': start_idx,
+#                 'sequence_length': self.total_frames
+#             }
+            
+#             sequences.append((current_frames, future_frames, seq_metadata))
+        
+#         return sequences
+    
+#     def __iter__(self):
+#         """
+#         Iterate through all sequences in all shards.
+#         Yields (current_frames, future_frames, metadata) tuples.
+#         """
+#         for sample in self.dataset:
+#             frames = sample['frames']  # [seq_len, H, W, C] uint8
+#             metadata = sample['metadata']
+            
+#             # Skip videos that are too short
+#             if frames.shape[0] < self.total_frames:
+#                 continue
+            
+#             # Preprocess frames
+#             processed_frames = self._preprocess_frames(frames)
+            
+#             # Create sliding window sequences
+#             sequences = self._create_sliding_window_sequences(processed_frames, metadata)
+            
+#             # Yield each sequence
+#             for sequence in sequences:
+#                 yield sequence
+    
+#     def __repr__(self) -> str:
+#         return f"YouTubeShardDatasetWrapper(m={self.m}, n={self.n}, target_size=({self.target_height}, {self.target_width}), dataset={self.dataset})"

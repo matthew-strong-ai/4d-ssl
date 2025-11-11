@@ -1,4 +1,4 @@
-name: matt-sky-base-prediction
+name: matt-pi3-ff-2hz-reg
 
 workload_variant_config:
   training_fn: train_cluster.train_model
@@ -12,7 +12,7 @@ workload_variant_config:
       project: matt_strong_cuda
 
 cluster_resources:
-  gpu_machine_type: a100.40.8
+  gpu_machine_type: a100.8
   num_gpus: 16  # Direct GPU count
   customer_resource: "research"  # Required field
 

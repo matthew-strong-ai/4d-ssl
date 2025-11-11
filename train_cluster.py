@@ -13,22 +13,18 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import wandb
 import torchvision.transforms.functional as TF
-import random
 
 # Configuration management
 from yacs.config import CfgNode as CN
 from config.defaults import get_cfg_defaults, update_config
 
-from utils.geometry_torch import recover_focal_shift
 import utils3d
 
 # all imports for spatracker.
 from SpaTrackerV2.models.SpaTrackV2.models.vggt4track.utils.load_fn import preprocess_image, get_default_transforms, preprocess_numpy_image
 from SpaTrackerV2.ssl_image_dataset import SequenceLearningDataset
 from simple_s3_dataset import S3Dataset
-from utils.youtube_s3_dataset import YouTubeS3Dataset
 
-# add to path where pi3 is located (one folder deep relative to this file)
 import sys
 
 from cotracker.utils.visualizer import Visualizer
@@ -39,18 +35,506 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pi3"))
 from pi3.utils.geometry import depth_edge
 from pi3.models.pi3 import Pi3, AutonomyPi3, AutoregressivePi3
 
+# Import distilled ViT
+from distilled_vit import create_distilled_vit, DistillationLoss
+
 # import pi3 losses
 from losses import Pi3Losses, NormalLosses, PointCloudLosses, normalize_pred_gt
 from s3_utils import download_from_s3_uri
 from debug_utils import check_for_nans, check_model_parameters
 
 # Import refactored utility modules
+from utils.youtube_s3_dataset import YouTubeS3Dataset
 from utils.s3_utils import save_state_dict_to_s3, upload_file_to_s3
 from utils.augmentation_utils import apply_random_augmentations
 from utils.visualization_utils import save_batch_images_to_png, visualize_dynamic_objects, visualize_motion_maps, visualize_motion_flow_overlay
+from utils.motion_generation import generate_motion_gt_from_flow
 from utils.validation_utils import run_validation, align_prediction_shapes, denormalize_intrinsics
 from utils.analysis_utils import analyze_object_dynamics
 from utils.model_factory import create_model, validate_model_config, get_model_info
+from utils.raft_utils import initialize_raft_model, generate_optical_flow_gt
+
+
+def generate_optical_flow_gt(frames, raft_model, InputPadder, device='cuda', visualize=False):
+    """
+    Generate optical flow ground truth using pre-loaded RAFT model.
+    
+    Args:
+        frames: Input frames tensor [B, T, C, H, W] or numpy array
+        raft_model: Pre-loaded RAFT model
+        InputPadder: RAFT's InputPadder class
+        device: Device to run computation on
+        visualize: Whether to show flow visualization during generation
+        
+    Returns:
+        flow_gt: Optical flow ground truth [B, T-1, H, W, 2] with (dx, dy) flow vectors
+    """
+
+    if raft_model is None:
+        return None
+    try:
+        # Convert frames to correct format
+        if isinstance(frames, np.ndarray):
+            frames = torch.from_numpy(frames).to(device)
+        else:
+            frames = frames.to(device)
+            
+        # Ensure frames are in [B, T, C, H, W] format
+        if frames.dim() == 4:  # [T, C, H, W]
+            frames = frames.unsqueeze(0)  # [1, T, C, H, W]
+            
+        B, T, C, H, W = frames.shape
+        flow_list = []
+        visualize = False  # Disable visualization for now
+        
+        # Compute flow between consecutive frames
+        with torch.no_grad():
+            for t in range(T - 1):
+                # Get consecutive frames
+                frame1 = frames[:, t]  # [B, C, H, W]
+                frame2 = frames[:, t + 1]  # [B, C, H, W]
+
+                # Pad images for RAFT (divisible by 8)
+                padder = InputPadder(frame1.shape)
+                frame1, frame2 = padder.pad(frame1, frame2)
+
+                frame1 = (frame1 * 255.0)
+                frame2 = (frame2 * 255.0)
+                
+                # Compute flow
+                _, flow_up = raft_model(frame1, frame2, iters=20, test_mode=True)
+
+                # Unpad flow
+                flow = padder.unpad(flow_up)  # [B, 2, H, W]
+                
+                # Keep flow in pixel units (no normalization)
+                # flow = flow / 200.0  # Removed normalization
+                
+                # Optional: Clamp extreme values to [-1, 1] range
+                # flow = torch.clamp(flow, -1.0, 1.0)
+                
+                # Transpose to [B, H, W, 2]
+                flow = flow.permute(0, 2, 3, 1)
+                flow_list.append(flow)
+                
+                # Add visualization
+                if visualize:  # Only visualize first 3 transitions
+                    import sys
+                    import os
+                    sys.path.append('/home/matthew_strong/Desktop/autonomy-wild/RAFT/core/utils')
+                    from flow_viz import flow_to_image
+                    import imageio
+                    
+                    # Convert to numpy for visualization
+                    flow_np = flow[0].cpu().numpy()  # Take first batch item [H, W, 2]
+                    
+                    # Use RAFT's flow visualization
+                    flow_img = flow_to_image(flow_np)  # Returns [H, W, 3] RGB image
+
+                    # Save visualization
+                    filename = f"flow_gt_gen_frame_{t}_to_{t+1}.png"
+                    imageio.imwrite(filename, flow_img)
+                
+        # Stack flows: [B, T-1, H, W, 2]
+        flow_gt = torch.stack(flow_list, dim=1)
+        
+        return flow_gt
+        
+    except Exception as e:
+        print(f"Error generating optical flow GT: {e}")
+        return None
+
+
+def generate_motion_gt_from_flow(flow_gt, point_maps, cfg, rgb_frames=None, object_segformer=None, dynamic_classes=None, visualize=True):
+    """
+    Generate motion ground truth from optical flow and 3D point maps.
+    Tracks pixels across ALL timesteps to detect cumulative motion.
+    
+    Args:
+        flow_gt: Optical flow ground truth [B, T-1, H, W, 2] (pixel units)
+        point_maps: 3D point predictions [B, T, H, W, 3] (world coordinates)
+        cfg: Configuration object
+        rgb_frames: RGB frames [T, 3, H, W] for segmentation (optional)
+        object_segformer: SegFormer model for object detection (optional)
+        dynamic_classes: List of class IDs to consider for motion (e.g. [1,2] for vehicle,person)
+        
+    Returns:
+        motion_gt: Binary motion masks [B, T, H, W, 1] where 1 = dynamic
+    """
+    B, T_minus_1, H, W, _ = flow_gt.shape
+    T = T_minus_1 + 1  # Full temporal dimension
+    device = flow_gt.device
+
+    
+    # Initialize cumulative motion tracking
+    # Track the path length (sum of all frame-to-frame motions)
+    cumulative_path_length = torch.zeros(B, H, W, device=device)
+    motion_gt = torch.zeros(B, T, H, W, 1, device=device)
+    
+    # Create initial pixel coordinate grids
+    y_coords, x_coords = torch.meshgrid(
+        torch.arange(H, device=device, dtype=torch.float32),
+        torch.arange(W, device=device, dtype=torch.float32),
+        indexing='ij'
+    )
+    
+    
+    # Run segmentation if provided
+    object_masks = None
+    if rgb_frames is not None and object_segformer is not None and dynamic_classes is not None:
+        import numpy as np
+        
+        with torch.no_grad():
+            # Convert torch tensors to numpy arrays for the segmentation model
+            rgb_frames_np = []
+            for t in range(T):
+                # Convert from [3, H, W] to [H, W, 3] numpy array
+                frame_np = rgb_frames[t].cpu().numpy()  # [3, H, W]
+                frame_np = np.transpose(frame_np, (1, 2, 0))  # [H, W, 3]
+                frame_np = (frame_np * 255).astype(np.uint8)  # Convert to 0-255 range
+                rgb_frames_np.append(frame_np)
+            
+            # Run segmentation using process_frames method
+            seg_results = object_segformer.process_frames(rgb_frames_np, text_prompt="car. vehicle. person. road sign. traffic light.", verbose=False)
+            
+            # Get composite masks with class IDs
+            seg_predictions = seg_results['composite_masks']  # List of [H, W] numpy arrays
+            
+            # Convert to torch tensor and create mask for dynamic object classes
+            object_masks = torch.zeros(T, H, W, device=device, dtype=torch.bool)
+            for t in range(T):
+                seg_t = torch.from_numpy(seg_predictions[t]).to(device)
+                for class_id in dynamic_classes:
+                    object_masks[t] = object_masks[t] | (seg_t == class_id)
+            
+            print(f"🚗 Segmentation complete. Dynamic pixels per frame:")
+            for t_seg in range(T):
+                dynamic_count = object_masks[t_seg].sum().item()
+                total_count = object_masks[t_seg].numel()
+                print(f"   Frame {t_seg}: {dynamic_count}/{total_count} ({100*dynamic_count/total_count:.1f}%)")
+    
+    # Track previous 3D positions for computing motion
+    previous_points_3d = None
+
+    # Process each timestep
+    for t in range(T):
+        if t == 0:
+            # For first frame, use original pixel coordinates
+            tracked_x = x_coords[None, :, :].expand(B, -1, -1)
+            tracked_y = y_coords[None, :, :].expand(B, -1, -1)
+        else:
+            # For subsequent frames, use flow per frame directly from previous frame
+            flow_t = flow_gt[:, t-1]  # [B, H, W, 2]
+            flow_pixels = flow_t  # Already in pixel units
+
+            # Apply flow from previous frame position
+            tracked_x = tracked_x + flow_pixels[..., 0]
+            tracked_y = tracked_y + flow_pixels[..., 1]
+        
+        # Sample current 3D positions at tracked locations
+        grid_x = 2.0 * torch.clamp(tracked_x, 0, W-1) / (W - 1) - 1.0
+        grid_y = 2.0 * torch.clamp(tracked_y, 0, H-1) / (H - 1) - 1.0
+        grid = torch.stack([grid_x, grid_y], dim=-1)  # [B, H, W, 2]
+        
+        # Get current frame's 3D points
+        current_points = point_maps[:, t].permute(0, 3, 1, 2)  # [B, 3, H, W]
+        
+        # Sample 3D positions at tracked pixel locations
+        tracked_points_3d = torch.nn.functional.grid_sample(
+            current_points,
+            grid,
+            mode='bilinear',
+            align_corners=True,
+            padding_mode='zeros'
+        ).permute(0, 2, 3, 1)  # [B, H, W, 3]
+        
+        if t > 0 and previous_points_3d is not None:
+            # Compute frame-to-frame 3D motion
+            frame_motion_3d = tracked_points_3d - previous_points_3d  # [B, H, W, 3]
+            
+            # Compute frame-to-frame motion magnitude
+            frame_motion_magnitude = torch.sqrt(
+                frame_motion_3d[..., 0]**2 + 
+                frame_motion_3d[..., 1]**2 + 
+                frame_motion_3d[..., 2]**2
+            )  # [B, H, W]
+            
+            # Add to cumulative path length
+            cumulative_path_length = cumulative_path_length + frame_motion_magnitude
+        
+        # Update previous points for next iteration
+        previous_points_3d = tracked_points_3d
+        
+        # Store raw cumulative path length for median computation
+        if t == T - 1:  # On the last frame, compute final motion masks
+            # Pixel-by-pixel classification based on individual motion
+            motion_threshold = cfg.POINT_MOTION.MOTION_THRESHOLD
+            
+            # Classify each pixel as dynamic if its cumulative motion exceeds threshold
+            is_dynamic = (cumulative_path_length > motion_threshold).float()  # [B, H, W]
+            
+            if object_masks is not None:
+                # Create mask of valid object classes to consider
+                valid_object_mask = torch.zeros_like(object_masks, dtype=torch.bool)
+                for obj_id in dynamic_classes:
+                    valid_object_mask = valid_object_mask | (object_masks == obj_id)
+                
+                # Apply pixel-wise motion classification only to valid object pixels
+                for t_update in range(T):
+                    # Get mask of valid objects for this frame
+                    obj_mask_t = valid_object_mask[t_update].float().unsqueeze(0)  # [1, H, W]
+                    
+                    # Pixel is dynamic if: (1) it moved more than threshold AND (2) it belongs to a valid object class
+                    motion_gt[:, t_update, :, :, 0] = is_dynamic * obj_mask_t
+                
+                # Print statistics per object class
+                print(f"\n📊 Pixel-wise motion statistics:")
+                for obj_id in dynamic_classes:
+                    obj_mask_all_t = object_masks == obj_id  # [T, H, W]
+                    obj_union_mask = obj_mask_all_t.any(dim=0)  # [H, W]
+                    
+                    if obj_union_mask.sum() > 0:
+                        # Extract motion values for this object
+                        obj_motion_values = cumulative_path_length[0][obj_union_mask]
+                        
+                        # Count dynamic pixels for this object
+                        obj_dynamic_pixels = (obj_motion_values > motion_threshold).sum().item()
+                        total_obj_pixels = obj_union_mask.sum().item()
+                        dynamic_ratio = obj_dynamic_pixels / total_obj_pixels if total_obj_pixels > 0 else 0
+                        
+                        # Compute statistics
+                        median_motion = torch.median(obj_motion_values).item()
+                        mean_motion = obj_motion_values.mean().item()
+                        max_motion = obj_motion_values.max().item()
+                        
+                        print(f"   Object class {obj_id}:")
+                        print(f"     - Dynamic pixels: {obj_dynamic_pixels}/{total_obj_pixels} ({dynamic_ratio:.1%})")
+                        print(f"     - Motion stats: median={median_motion:.3f}m, mean={mean_motion:.3f}m, max={max_motion:.3f}m")
+                
+                # Summary statistics
+                total_motion_pixels = motion_gt.sum().item()
+                print(f"\n   SUMMARY: Total dynamic pixels = {total_motion_pixels} (pixel-wise classification)")
+                    
+            else:
+                # No object masks - apply pixel-wise threshold to all pixels
+                for t_update in range(T):
+                    motion_gt[:, t_update, :, :, 0] = is_dynamic
+        
+        # Visualization
+        if visualize and t < 3 and t > 0:  # Visualize first few frames with motion
+            import matplotlib.pyplot as plt
+            import numpy as np
+            import imageio
+            import sys
+            sys.path.append('/home/matthew_strong/Desktop/autonomy-wild/RAFT/core/utils')
+            from flow_viz import flow_to_image
+            
+            viz_batch = 0  # Visualize first batch item
+            
+            # Create a figure with multiple subplots
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+            
+            # 1. Flow visualization
+            flow_viz = flow_gt[viz_batch, t-1].cpu().numpy()  # [H, W, 2]
+            flow_img = flow_to_image(flow_viz)
+            axes[0, 0].imshow(flow_img)
+            axes[0, 0].set_title(f'Optical Flow {t-1}→{t}')
+            axes[0, 0].axis('off')
+            
+            # 2. Current 3D points (depth visualization)
+            points_current = point_maps[viz_batch, t].cpu().numpy()  # [H, W, 3]
+            depth_current = points_current[..., 2]  # Z coordinate as depth
+            im_depth = axes[0, 1].imshow(depth_current, cmap='viridis')
+            axes[0, 1].set_title(f'Depth at Frame {t}')
+            axes[0, 1].axis('off')
+            plt.colorbar(im_depth, ax=axes[0, 1], fraction=0.046)
+            
+            # 3. Tracked points visualization (show displacement)
+            tracked_points = tracked_points_3d[viz_batch].cpu().numpy()  # [H, W, 3]
+            tracked_depth = tracked_points[..., 2]
+            im_tracked = axes[0, 2].imshow(tracked_depth, cmap='viridis')
+            axes[0, 2].set_title(f'Tracked Points Depth at Frame {t}')
+            axes[0, 2].axis('off')
+            plt.colorbar(im_tracked, ax=axes[0, 2], fraction=0.046)
+            
+            # 4. Frame-to-frame motion magnitude
+            if t > 0:
+                motion_mag = frame_motion_magnitude[viz_batch].cpu().numpy()  # [H, W]
+                im_motion = axes[1, 0].imshow(motion_mag, cmap='hot')
+                axes[1, 0].set_title(f'Motion Magnitude {t-1}→{t} (meters)')
+                axes[1, 0].axis('off')
+                plt.colorbar(im_motion, ax=axes[1, 0], fraction=0.046)
+            
+            # 5. Cumulative path length
+            cum_motion = cumulative_path_length[viz_batch].cpu().numpy()  # [H, W]
+            im_cum = axes[1, 1].imshow(cum_motion, cmap='hot')
+            axes[1, 1].set_title(f'Cumulative Motion up to Frame {t} (meters)')
+            axes[1, 1].axis('off')
+            plt.colorbar(im_cum, ax=axes[1, 1], fraction=0.046)
+            
+            # 6. Binary motion mask (show object-constrained motion only)
+            if object_masks is not None:
+                # Show object-constrained motion even during intermediate frames
+                motion_threshold = cfg.POINT_MOTION.MOTION_THRESHOLD
+                raw_motion_mask = (cumulative_path_length[viz_batch] > motion_threshold).cpu().numpy()
+                
+                # Apply object constraint to raw motion using dynamic_classes
+                obj_mask_t = torch.zeros_like(object_masks[t], dtype=torch.bool)
+                for class_id in dynamic_classes:
+                    obj_mask_t = obj_mask_t | (object_masks[t] == class_id)
+                obj_constrained_motion = raw_motion_mask * obj_mask_t.cpu().numpy()
+                
+                axes[1, 2].imshow(obj_constrained_motion, cmap='RdYlBu_r', vmin=0, vmax=1)
+                class_names = ['road', 'vehicle', 'person', 'traffic light', 'traffic sign', 'sky', 'building/background']
+                dynamic_class_names = [class_names[i] for i in dynamic_classes if i < len(class_names)]
+                class_str = '+'.join(dynamic_class_names)
+                if t < T - 1:
+                    axes[1, 2].set_title(f'Object Motion at Frame {t} ({class_str} only)')
+                else:
+                    axes[1, 2].set_title(f'Final Object Motion Mask ({class_str})')
+            else:
+                # No object masks - show raw thresholded motion
+                motion_threshold = cfg.POINT_MOTION.MOTION_THRESHOLD
+                temp_motion_mask = (cumulative_path_length[viz_batch] > motion_threshold).cpu().numpy()
+                axes[1, 2].imshow(temp_motion_mask, cmap='RdYlBu_r', vmin=0, vmax=1)
+                axes[1, 2].set_title(f'Raw Motion Mask at Frame {t}')
+            axes[1, 2].axis('off')
+            
+            # Add flow arrows overlaid on depth
+            if t < 3:  # Only for first few frames
+                # Subsample for arrow visualization
+                step = 20
+                y_sub, x_sub = np.mgrid[0:H:step, 0:W:step]
+                flow_x_sub = flow_viz[::step, ::step, 0]
+                flow_y_sub = flow_viz[::step, ::step, 1]
+                
+                # Create new subplot for flow arrows on depth
+                plt.figure(figsize=(10, 8))
+                plt.imshow(depth_current, cmap='viridis', alpha=0.8)
+                plt.quiver(x_sub, y_sub, flow_x_sub, flow_y_sub, 
+                          angles='xy', scale_units='xy', scale=1, 
+                          color='red', width=0.003, headwidth=3, headlength=4)
+                plt.title(f'Flow Arrows on Depth - Frame {t}')
+                plt.colorbar(label='Depth (m)')
+                plt.savefig(f'flow_on_depth_frame_{t}.png', dpi=150, bbox_inches='tight')
+                plt.close()
+                print(f"💾 Saved flow_on_depth_frame_{t}.png")
+                
+                # Also visualize segmentation if available
+                if object_masks is not None:
+                    plt.figure(figsize=(20, 10))
+                    
+                    # Get RGB frame
+                    rgb_frame_t = rgb_frames[t].cpu().numpy()  # [3, H, W]
+                    rgb_frame_t = np.transpose(rgb_frame_t, (1, 2, 0))  # [H, W, 3]
+                    rgb_frame_t = np.clip(rgb_frame_t, 0, 1)  # Ensure in [0,1] range
+                    
+                    # Show segmentation predictions
+                    seg_pred_t = seg_predictions[t]
+                    obj_mask_t = object_masks[t].cpu().numpy()
+                    
+                    # Define colors for each class (matching CityscapesAsGSAM2)
+                    class_colors = np.array([
+                        [128, 64, 128],   # 0: road - purple
+                        [64, 0, 128],     # 1: vehicle - dark blue
+                        [255, 128, 0],    # 2: person - orange
+                        [255, 255, 0],    # 3: traffic light - yellow
+                        [192, 128, 255],  # 4: traffic sign - light purple
+                        [128, 128, 255],  # 5: sky - light blue
+                        [128, 128, 128]   # 6: background - gray
+                    ]) / 255.0  # Normalize to [0,1]
+                    
+                    # Create colored segmentation overlay
+                    seg_colored = np.zeros((H, W, 3))
+                    for class_id in range(7):
+                        mask = seg_pred_t == class_id
+                        seg_colored[mask] = class_colors[class_id]
+                    
+                    plt.subplot(2, 3, 1)
+                    plt.imshow(rgb_frame_t)
+                    plt.title(f'RGB Frame {t}')
+                    plt.axis('off')
+                    
+                    plt.subplot(2, 3, 2)
+                    plt.imshow(seg_pred_t, cmap='tab10')
+                    plt.title(f'Segmentation Classes')
+                    plt.colorbar(label='Class ID', ticks=range(7))
+                    plt.axis('off')
+                    
+                    plt.subplot(2, 3, 3)
+                    # RGB with segmentation overlay
+                    alpha = 0.5
+                    seg_overlay = rgb_frame_t * (1 - alpha) + seg_colored * alpha
+                    plt.imshow(seg_overlay)
+                    plt.title(f'RGB + Segmentation Overlay')
+                    plt.axis('off')
+                    
+                    plt.subplot(2, 3, 4)
+                    plt.imshow(obj_mask_t, cmap='gray')
+                    class_names = ['road', 'vehicle', 'person', 'traffic light', 'traffic sign', 'sky', 'building/background']
+                    dynamic_class_names_vis = [class_names[i] for i in dynamic_classes if i < len(class_names)]
+                    class_str_vis = ', '.join(dynamic_class_names_vis)
+                    plt.title(f'Dynamic Objects ({class_str_vis})')
+                    plt.axis('off')
+                    
+                    plt.subplot(2, 3, 5)
+                    # Overlay motion on object mask
+                    overlay = np.zeros((H, W, 3))
+                    # Get motion mask for visualization
+                    if t < T - 1:
+                        # Use temporary threshold for visualization, but constrain to object classes
+                        motion_threshold = cfg.POINT_MOTION.MOTION_THRESHOLD
+                        raw_vis_motion_mask = (cumulative_path_length[viz_batch] > motion_threshold).cpu().numpy()
+                        # Apply object constraint to visualization
+                        obj_mask_vis = torch.zeros_like(object_masks[t], dtype=torch.bool)
+                        for class_id in dynamic_classes:
+                            obj_mask_vis = obj_mask_vis | (object_masks[t] == class_id)
+                        vis_motion_mask = raw_vis_motion_mask * obj_mask_vis.cpu().numpy()
+                    else:
+                        # Use final motion mask
+                        vis_motion_mask = motion_gt[viz_batch, t, :, :, 0].cpu().numpy()
+                    
+                    overlay[..., 0] = vis_motion_mask  # Red channel for motion
+                    overlay[..., 1] = obj_mask_t   # Green channel for objects
+                    plt.imshow(overlay)
+                    plt.title('Motion (red) on Objects (green)')
+                    plt.axis('off')
+                    
+                    plt.subplot(2, 3, 6)
+                    # RGB with motion overlay (only on objects)
+                    motion_overlay = rgb_frame_t.copy()
+                    motion_pixels = vis_motion_mask > 0.5
+                    motion_overlay[motion_pixels, 0] = 1.0  # Red tint for motion
+                    motion_overlay[motion_pixels, 1] *= 0.5  # Reduce green
+                    motion_overlay[motion_pixels, 2] *= 0.5  # Reduce blue
+                    plt.imshow(motion_overlay)
+                    plt.title('RGB + Motion (on objects only)')
+                    plt.axis('off')
+                    
+                    plt.tight_layout()
+                    plt.savefig(f'segmentation_viz_frame_{t}.png', dpi=150, bbox_inches='tight')
+                    plt.close()
+                    print(f"💾 Saved segmentation_viz_frame_{t}.png")
+            
+            plt.suptitle(f'Motion Detection Visualization - Frame {t}', fontsize=16)
+            plt.tight_layout()
+            plt.savefig(f'motion_detection_viz_frame_{t}.png', dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"🎨 Motion detection visualization saved: motion_detection_viz_frame_{t}.png")
+            print(f"   Flow range: x=[{flow_viz[..., 0].min():.1f}, {flow_viz[..., 0].max():.1f}], y=[{flow_viz[..., 1].min():.1f}, {flow_viz[..., 1].max():.1f}] pixels")
+            print(f"   Depth range: [{depth_current.min():.2f}, {depth_current.max():.2f}] meters")
+            print(f"   Motion range: [{motion_mag.min():.3f}, {motion_mag.max():.3f}] meters")
+            print(f"   Cumulative motion: [{cum_motion.min():.3f}, {cum_motion.max():.3f}] meters")
+            # Get current motion mask for stats
+            if t < T - 1:
+                temp_motion_mask = (cumulative_path_length[viz_batch] > motion_threshold).cpu().numpy()
+                print(f"   Dynamic pixels (temp): {temp_motion_mask.sum()} / {temp_motion_mask.size} ({100*temp_motion_mask.mean():.1f}%)")
+            else:
+                final_motion_mask = motion_gt[viz_batch, t, :, :, 0].cpu().numpy()
+                print(f"   Dynamic pixels (final): {final_motion_mask.sum()} / {final_motion_mask.size} ({100*final_motion_mask.mean():.1f}%)")
+    
+    return motion_gt
 
 
 def convert_mapanything_to_pi3_format(mapanything_output, B, T, H, W, cfg):
@@ -259,13 +743,6 @@ def train_model(train_config=None, experiment_tracker=None):
         kwargs_handlers=[ddp_kwargs]
     )
     
-    # Add DDP error handling hook
-    def ddp_error_handler(self, *args, **kwargs):
-        print("🚨 DDP Reduction Error Detected!")
-        print("This usually means unused parameters exist.")
-        print("Check the unused parameter debugging output above.")
-        raise RuntimeError("DDP reduction error - check unused parameters")
-    
     # Override DDP error handling if distributed
     if accelerator.num_processes > 1:
         print(f"🔧 Running distributed training with {accelerator.num_processes} processes")
@@ -303,7 +780,8 @@ def train_model(train_config=None, experiment_tracker=None):
             min_sequence_length=cfg.DATASET.get('YOUTUBE_MIN_SEQUENCE_LENGTH', 50),
             skip_frames=cfg.DATASET.get('YOUTUBE_SKIP_FRAMES', 300),
             max_workers=cfg.DATASET.get('YOUTUBE_MAX_WORKERS', 8),
-            verbose=True
+            verbose=True,
+            frame_sampling_rate=cfg.DATASET.get('FRAME_SAMPLING_RATE', 1)  # 1=10Hz, 5=2Hz
         )
         
         print(f"✅ YouTube dataset loaded: {len(full_dataset):,} training samples")
@@ -427,6 +905,10 @@ def train_model(train_config=None, experiment_tracker=None):
     effective_workers = num_workers * num_gpus if num_gpus > 1 else num_workers
     print(f"   🚀 Effective worker processes across all GPUs: {effective_workers}")
 
+
+    # num_workers = 8
+    # prefetch_factor = 4
+    # import ipdb; ipdb.set_trace()
     # Create optimized dataloaders with enhanced configuration
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -502,6 +984,40 @@ def train_model(train_config=None, experiment_tracker=None):
     # Create model using factory
     train_model = create_model(cfg, dinov3_local_path)
     
+    # Create distilled ViT if enabled
+    distilled_vit = None
+    distillation_loss_fn = None
+    
+    if cfg.MODEL.USE_DISTILLED_VIT:
+        print(f"\n🔬 Creating Distilled ViT with configuration:")
+        print(f"   - Teacher: {cfg.MODEL.ENCODER_NAME}")
+        print(f"   - Student embed_dim: {cfg.MODEL.DISTILLED_VIT.EMBED_DIM}")
+        print(f"   - Student depth: {cfg.MODEL.DISTILLED_VIT.DEPTH}")
+        print(f"   - Student heads: {cfg.MODEL.DISTILLED_VIT.NUM_HEADS}")
+        print(f"   - Distill tokens: {cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS}")
+        
+
+        distilled_vit = create_distilled_vit(
+            teacher_model_name=cfg.MODEL.ENCODER_NAME,
+            embed_dim=cfg.MODEL.DISTILLED_VIT.EMBED_DIM,
+            depth=cfg.MODEL.DISTILLED_VIT.DEPTH,
+            num_heads=cfg.MODEL.DISTILLED_VIT.NUM_HEADS,
+            distill_tokens=cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS
+        )
+        
+        distillation_loss_fn = DistillationLoss(
+            distill_tokens=cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS,
+            loss_weights={
+                'point_features': cfg.LOSS.DISTILLATION_POINT_FEATURES_WEIGHT,
+                'camera_features': cfg.LOSS.DISTILLATION_CAMERA_FEATURES_WEIGHT,
+                'autonomy_features': cfg.LOSS.DISTILLATION_AUTONOMY_FEATURES_WEIGHT
+            },
+            temperature=cfg.MODEL.DISTILLED_VIT.TEMPERATURE,
+            use_cosine_similarity=cfg.MODEL.DISTILLED_VIT.USE_COSINE_SIMILARITY
+        )
+        
+        print(f"✅ Distilled ViT created with {sum(p.numel() for p in distilled_vit.parameters())/1e6:.1f}M parameters")
+    
     # Verify gradient flow setup (especially if using freeze_decoders)
     if hasattr(train_model, 'verify_gradient_flow'):
         print("\n=== Verifying Gradient Flow Configuration ===")
@@ -521,11 +1037,11 @@ def train_model(train_config=None, experiment_tracker=None):
     # Initialize segmentation model based on config
     if cfg.MODEL.SEGMENTATION_MODEL == "gsam2":
         gsam2 = GSAM2()
-        print("✅ Initialized GSAM2 for segmentation (6 classes)")
+        print(f"✅ Initialized GSAM2 for segmentation ({cfg.MODEL.SEGMENTATION_NUM_CLASSES} classes)")
     elif cfg.MODEL.SEGMENTATION_MODEL in ["segformer", "deeplabv3"]:
         from utils.cityscapes_segmentation import CityscapesAsGSAM2
         gsam2 = CityscapesAsGSAM2(model_type=cfg.MODEL.SEGMENTATION_MODEL)
-        print(f"✅ Initialized Cityscapes {cfg.MODEL.SEGMENTATION_MODEL} for segmentation (7 classes)")
+        print(f"✅ Initialized Cityscapes {cfg.MODEL.SEGMENTATION_MODEL} for segmentation ({cfg.MODEL.SEGMENTATION_NUM_CLASSES} classes)")
     else:
         raise ValueError(f"Unknown segmentation model: {cfg.MODEL.SEGMENTATION_MODEL}")
 
@@ -533,10 +1049,18 @@ def train_model(train_config=None, experiment_tracker=None):
     cotracker.eval()
     print("Successfully created training model: CoTracker3")
 
+    # Load SegFormer for object segmentation (independent of training segmentation)
+    from utils.cityscapes_segmentation import CityscapesAsGSAM2
+    object_segformer = CityscapesAsGSAM2(model_type="segformer")
+    print("✅ Loaded SegFormer for object segmentation (7 Cityscapes classes)")
+    
+    # Cityscapes 7-class system:
+    # 0: road, 1: vehicle, 2: person, 3: traffic light, 4: traffic sign, 5: sky, 6: bg/building
+    # Dynamic object classes we care about:
+    DYNAMIC_CLASSES = [1, 2]  # vehicle, person
+    print(f"   Will track motion for: vehicle (1), person (2)")
 
-    # let's load the sky segmentation model
     from pi3.models.segformer.model import EncoderDecoder
-
     segformer = EncoderDecoder()
     segformer.load_state_dict(torch.load('segformer.b0.512x512.ade.160k.pth', map_location=torch.device('cpu'), weights_only=False)['state_dict'])
     segformer = segformer.to(accelerator.device)
@@ -561,6 +1085,8 @@ def train_model(train_config=None, experiment_tracker=None):
         # Load decoders (if they exist)
         if hasattr(train_model, 'decoder'):
             train_model.decoder.load_state_dict(frozen_model.decoder.state_dict())
+
+        # commenting this out for now
         if hasattr(train_model, 'point_decoder'):
             train_model.point_decoder.load_state_dict(frozen_model.point_decoder.state_dict())
         if hasattr(train_model, 'conf_decoder'):
@@ -592,21 +1118,7 @@ def train_model(train_config=None, experiment_tracker=None):
             }
             train_conf_dict.update(matched_conf_dict)
             train_model.conf_head.load_state_dict(train_conf_dict)
-        
-        # Copy point head weights to motion head for better initialization (if motion head exists)
-        if hasattr(train_model, 'motion_head') and train_model.motion_head is not None:
-            print("🔄 Copying point head weights to motion head for better initialization...")
-            # Both point_head and motion_head have same architecture (FutureLinearPts3d with output_dim=3)
-            # so we can copy all weights directly
-            train_model.motion_head.load_state_dict(train_model.point_head.state_dict())
-            print("✅ Successfully copied point head weights to motion head")
-        
-            # other decoders for motion and segmentation
-            train_model.motion_decoder.load_state_dict(frozen_model.point_decoder.state_dict())
 
-        if hasattr(train_model, 'segmentation_decoder') and train_model.segmentation_decoder is not None:
-            train_model.segmentation_decoder.load_state_dict(frozen_model.point_decoder.state_dict())
-        
         # Load camera head (if it exists)
         if hasattr(train_model, 'camera_head'):
             frozen_camera_dict = frozen_model.camera_head.state_dict()
@@ -617,6 +1129,20 @@ def train_model(train_config=None, experiment_tracker=None):
             }
             train_camera_dict.update(matched_camera_dict)
             train_model.camera_head.load_state_dict(train_camera_dict)
+
+        # Copy point head weights to motion head for better initialization (if motion head exists)
+        if hasattr(train_model, 'motion_head') and train_model.motion_head is not None:
+            print("🔄 Copying point head weights to motion head for better initialization...")
+            # Both point_head and motion_head have same architecture (FutureLinearPts3d with output_dim=3)
+            # so we can copy all weights directly
+            # train_model.motion_head.load_state_dict(train_model.point_head.state_dict())
+            print("✅ Successfully copied point head weights to motion head")
+        
+            # other decoders for motion and segmentation
+            train_model.motion_decoder.load_state_dict(frozen_model.point_decoder.state_dict())
+
+        if hasattr(train_model, 'segmentation_decoder') and train_model.segmentation_decoder is not None:
+            train_model.segmentation_decoder.load_state_dict(frozen_model.point_decoder.state_dict())
         
         # Load image normalization buffers (if they exist)
         if hasattr(train_model, 'image_mean'):
@@ -641,8 +1167,6 @@ def train_model(train_config=None, experiment_tracker=None):
 
     # Define optimizer for train_model
     optimizer = torch.optim.AdamW(train_model.parameters(), lr=cfg.TRAINING.LEARNING_RATE)
-    
-    # Create warmup + cosine annealing scheduler
     total_steps = len(train_dataloader) * cfg.TRAINING.NUM_EPOCHS
     warmup_steps = min(cfg.TRAINING.WARMUP_STEPS, total_steps // 10)  # Cap warmup at 10% of total steps
     cosine_steps = total_steps - warmup_steps
@@ -670,28 +1194,73 @@ def train_model(train_config=None, experiment_tracker=None):
         print(f"📊 Using cosine annealing scheduler: {total_steps} total steps")
 
     # Prepare training components with Accelerator
-    if val_dataloader is not None:
-        train_model, optimizer, scheduler, train_dataloader, val_dataloader = accelerator.prepare(
-            train_model,
-            optimizer,
-            scheduler,
-            train_dataloader,
-            val_dataloader
+    distilled_vit_optimizer = None
+    distilled_vit_scheduler = None
+    
+    if distilled_vit is not None:
+        # Create separate optimizer for distilled ViT
+        distilled_vit_optimizer = torch.optim.AdamW(
+            distilled_vit.parameters(),
+            lr=cfg.TRAINING.LEARNING_RATE,
+            weight_decay=0.1
         )
+        distilled_vit_scheduler = CosineAnnealingLR(distilled_vit_optimizer, T_max=total_steps)
+        
+        if val_dataloader is not None:
+            train_model, distilled_vit, optimizer, distilled_vit_optimizer, scheduler, distilled_vit_scheduler, train_dataloader, val_dataloader = accelerator.prepare(
+                train_model,
+                distilled_vit,
+                optimizer,
+                distilled_vit_optimizer,
+                scheduler,
+                distilled_vit_scheduler,
+                train_dataloader,
+                val_dataloader
+            )
+        else:
+            train_model, distilled_vit, optimizer, distilled_vit_optimizer, scheduler, distilled_vit_scheduler, train_dataloader = accelerator.prepare(
+                train_model,
+                distilled_vit,
+                optimizer,
+                distilled_vit_optimizer,
+                scheduler,
+                distilled_vit_scheduler,
+                train_dataloader
+            )
     else:
-        train_model, optimizer, scheduler, train_dataloader = accelerator.prepare(
-            train_model,
-            optimizer, 
-            scheduler,
-            train_dataloader
-        )
+        if val_dataloader is not None:
+            train_model, optimizer, scheduler, train_dataloader, val_dataloader = accelerator.prepare(
+                train_model,
+                optimizer,
+                scheduler,
+                train_dataloader,
+                val_dataloader
+            )
+        else:
+            train_model, optimizer, scheduler, train_dataloader = accelerator.prepare(
+                train_model,
+                optimizer, 
+                scheduler,
+                train_dataloader
+            )
 
     # Move frozen model manually to accelerator.device (but do NOT prepare it if you don't train it)
     frozen_model.to(accelerator.device)
     device = accelerator.device
     
+    # Initialize RAFT model once if flow head is enabled
+    raft_model = None
+    InputPadder = None
+    if cfg.MODEL.USE_FLOW_HEAD:
+        print(f"[GPU {accelerator.process_index}] Initializing RAFT model for optical flow...")
+        raft_model, InputPadder = initialize_raft_model(device=device)
+        if raft_model is None:
+            print(f"[GPU {accelerator.process_index}] WARNING: RAFT initialization failed. Flow ground truth will be unavailable.")
+    
     # Synchronize all processes after model preparation
+    print(f"[GPU {accelerator.process_index}] Waiting for all GPUs after model preparation...")
     accelerator.wait_for_everyone()
+    print(f"[GPU {accelerator.process_index}] All GPUs synchronized after model preparation")
 
     # Create checkpoint directory
     if accelerator.is_main_process:
@@ -728,19 +1297,16 @@ def train_model(train_config=None, experiment_tracker=None):
     pseudo_gt_save_path = os.path.join(cfg.OUTPUT.CHECKPOINT_DIR, 'pseudo_gt_first_100_steps.pt')
 
 
-    print("waiting for all..")
+    print(f"[GPU {accelerator.process_index}] Waiting for all GPUs before training loop...")
     accelerator.wait_for_everyone()
-    print("Done!!!")
+    print(f"[GPU {accelerator.process_index}] All GPUs synchronized, starting training!")
 
     # Model warmup: Do a few forward passes without gradients to stabilize model states across GPUs
     print("🔥 Starting model warmup phase...")
     warmup_steps = 5  # Number of warmup forward passes
-    
     train_model.eval()  # Set to eval mode for warmup
     frozen_model.eval()
-    
     warmup_iterator = iter(train_dataloader)
-
 
     for warmup_step in range(warmup_steps):
         try:
@@ -748,12 +1314,9 @@ def train_model(train_config=None, experiment_tracker=None):
             print(f"   Warmup step {warmup_step + 1}/{warmup_steps} on process {accelerator.process_index}")
             
             with torch.no_grad():
-                # Process batch for warmup
                 X = batch[0]
                 y = batch[1] 
                 X_all = torch.cat([X, y], dim=1)
-
-                
                 batch_size = X_all.shape[0]
                 if batch_size == 1:
                     video_tensor_unaugmented_14 = preprocess_image(X_all[0], target_size=518, patch_size=14).unsqueeze(0)
@@ -779,24 +1342,20 @@ def train_model(train_config=None, experiment_tracker=None):
                     _ = frozen_model(video_tensor_unaugmented_14)
                     _ = train_model(subset_video_tensor)
                 
-                # Clear memory after warmup step
-                torch.cuda.empty_cache()
-                
         except StopIteration:
             # If we run out of data, break early
             break
     
+    torch.cuda.empty_cache()
     
     # Reset models to training mode
     train_model.train() 
-
-    print("Train model train")
     frozen_model.eval()  # Keep frozen model in eval mode
-    print("Frozen model eval")
 
     # Synchronize all processes after warmup
+    print(f"[GPU {accelerator.process_index}] Waiting for all GPUs after warmup...")
     accelerator.wait_for_everyone()
-    print("✅ Model warmup completed - all processes synchronized")
+    print(f"[GPU {accelerator.process_index}] ✅ Model warmup completed - all processes synchronized")
 
     for epoch in range(cfg.TRAINING.NUM_EPOCHS):
         epoch_loss = 0.0
@@ -806,10 +1365,13 @@ def train_model(train_config=None, experiment_tracker=None):
             disable=not accelerator.is_local_main_process
         )
         for step, batch in enumerate(progress_bar):
+            
             # Periodic memory cleanup to prevent gradual memory increase
             if step % 100 == 0:
+                print(f"[GPU {accelerator.process_index}] Step {global_step}: Performing memory cleanup...")
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
+                print(f"[GPU {accelerator.process_index}] Step {global_step}: Memory cleanup complete")
                 
             with accelerator.accumulate(train_model):
 
@@ -828,9 +1390,7 @@ def train_model(train_config=None, experiment_tracker=None):
                     # Handle larger batch sizes
                     video_tensors_unaugmented = []
                     for b in range(batch_size):
-                        # Get single sample: (T, C, H, W)
                         sample = X_all[b]  # (T, C, H, W)
-                        # Preprocess this sample without augmentations
                         processed_sample = preprocess_image(sample)  # (T, C, H, W)
                         video_tensors_unaugmented.append(processed_sample)
                     
@@ -892,20 +1452,59 @@ def train_model(train_config=None, experiment_tracker=None):
                 #         torch.save(pseudo_gt_storage, pseudo_gt_save_path)
                     
                 torch.cuda.empty_cache()
-
                 # run inference on the training model - handle both Pi3 and MapAnything
                 with torch.amp.autocast('cuda', dtype=dtype):
-                    # Pi3 forward pass (original)
+                    # autoregressive pi3 model forward pass
                     predictions = train_model(subset_video_tensor)
-                        
+                    
                 # Align prediction and pseudo_gt shapes before loss computation
                 predictions, pseudo_gt = align_prediction_shapes(predictions, pseudo_gt)
                 predictions, pseudo_gt = normalize_pred_gt(predictions, pseudo_gt)
 
-                # Construct motion maps and segmentation masks for training if enabled
                 motion_maps = None
                 segmentation_masks = None
-                if cfg.MODEL.USE_SEGMENTATION_HEAD or cfg.POINT_MOTION.TRAIN_MOTION:
+                
+                # Generate optical flow ground truth if flow head is enabled (independent of segmentation/motion)
+                if cfg.MODEL.USE_FLOW_HEAD:
+                    # Prepare frames for RAFT: convert from augmented 14x14 to full resolution RGB
+                    flow_frames = video_tensor_unaugmented_14[0]  # [T, 3, H, W]
+                    
+                    # Generate optical flow using RAFT
+                    # Set visualize=True to see flow during training (useful for debugging)
+                    visualize_flow = True
+                    flow_gt = generate_optical_flow_gt(flow_frames, raft_model, InputPadder, device=device, visualize=visualize_flow)
+                    
+                    if flow_gt is not None:
+                        # flow_gt shape: [B, T-1, H, W, 2]
+                        # Pad with zeros for the last frame to match T frames
+                        B_flow, T_minus_1, H_flow, W_flow, _ = flow_gt.shape
+                        zero_flow = torch.zeros(B_flow, 1, H_flow, W_flow, 2, device=flow_gt.device)
+                        flow_gt_padded = torch.cat([flow_gt, zero_flow], dim=1)  # [B, T, H, W, 2]
+                        pseudo_gt['flow'] = flow_gt_padded
+                        
+                        # Generate motion GT from flow if motion head is enabled
+                        if cfg.MODEL.USE_MOTION_HEAD:
+                            # Get 3D point maps from pseudo GT (world coordinates)
+                            point_maps = pseudo_gt['points']  # [B, T, H, W, 3]
+                            
+                            # Generate motion masks from flow and 3D points
+                            # Pass RGB frames for segmentation
+                            rgb_frames = video_tensor_unaugmented_14[0]  # [T, 3, H, W]
+                            motion_gt = generate_motion_gt_from_flow(flow_gt, point_maps, cfg, 
+                                                                    rgb_frames=rgb_frames,
+                                                                    object_segformer=object_segformer,
+                                                                    dynamic_classes=DYNAMIC_CLASSES)
+                            pseudo_gt['motion'] = motion_gt  # [B, T, H, W, 1]
+                            
+                            print(f"[GPU {accelerator.process_index}] Generated flow-derived motion GT: {motion_gt.shape}")
+                            dynamic_pixels = (motion_gt > 0.5).sum().item()
+                            total_pixels = motion_gt.numel()
+                            print(f"   Dynamic pixels: {dynamic_pixels} / {total_pixels} ({dynamic_pixels/total_pixels*100:.1f}%)")
+                    else:
+                        # raise exception
+                        raise RuntimeError("RAFT failed to generate optical flow ground truth, ore RAFT model not initialized properly.")
+                
+                if cfg.MODEL.USE_SEGMENTATION_HEAD: # or cfg.POINT_MOTION.TRAIN_MOTION:
                     # Convert predictions to numpy for processing
                     point_maps = pseudo_gt['points'].cpu().numpy()  # (B, T, H, W, 3)
                     rgb_frames = [video_tensor_unaugmented_14[0, t].permute(1, 2, 0).cpu().numpy() for t in range(X_all.shape[1])]
@@ -972,10 +1571,9 @@ def train_model(train_config=None, experiment_tracker=None):
                         # Cityscapes models return composite masks directly
                         composite_masks = results['composite_masks']
                     
-
                     # Run CoTracker for point tracking with binary mask
                     frames = torch.tensor(np.array(rgb_frames)).permute(0, 3, 1, 2)[None].float().to(device)
-                    
+
                     # Create motion masks that EXCLUDE static objects (road signs and traffic lights)
                     # Only include moving objects: vehicles (1), bicycles (2), and persons (3)
                     if cfg.POINT_MOTION.TRAIN_MOTION:
@@ -999,27 +1597,30 @@ def train_model(train_config=None, experiment_tracker=None):
                             pred_tracks, pred_visibility = cotracker(frames, grid_size=80, 
                                                             segm_mask=torch.from_numpy(binary_mask)[None, None], 
                                                             backward_tracking=True)
+                            print(f"[GPU {accelerator.process_index}] Step {global_step}: CoTracker complete")
                             # Immediately move to CPU to free GPU memory
                             pred_tracks = pred_tracks.cpu()
                             pred_visibility = pred_visibility.cpu()
                             torch.cuda.empty_cache()
 
-                        # Generate motion maps and segmentation masks
-                        # Convert class-aware masks to binary masks for analyze_object_dynamics
-                        # print(f"🔍 Binary masks for analysis: {len(binary_composite_masks)} frames, values: {np.unique(binary_composite_masks[0])}")
                         try:
                             _, motion_maps, dynamic_masks = analyze_object_dynamics(results, pred_tracks, pred_visibility, 
-                                                                point_maps[0], binary_composite_masks, verbose=False)
+                                                                point_maps[0], composite_masks, verbose=False)
                         except Exception as e:
                             print(f"⚠️ analyze_object_dynamics failed: {e}")
                             print(f"   Shapes - pred_tracks: {pred_tracks.shape}, point_maps: {point_maps[0].shape}")
                             motion_maps = None
                             dynamic_masks = None
-                    
-                        # add motion maps to pseudo_gt
-                        if motion_maps is not None:
-                            motion_tensor = torch.from_numpy(np.array(motion_maps)).float().to(device)  # (T, H, W, 3)
-                            pseudo_gt['motion'] = motion_tensor.unsqueeze(0)  # Add batch dimension: (1, T, H, W, 3)
+
+
+                        # add dynamic masks to pseudo_gt for object-based motion
+                        if dynamic_masks is not None:
+                            # dynamic_masks is a list of [H, W] binary masks (0=static, 1=dynamic)
+                            dynamic_masks_array = np.stack(dynamic_masks, axis=0)  # (T, H, W)
+                            # Add channel dimension to match expected shape
+                            dynamic_masks_array = np.expand_dims(dynamic_masks_array, axis=-1)  # (T, H, W, 1)
+                            motion_tensor = torch.from_numpy(dynamic_masks_array).float().to(device)  # (T, H, W, 1)
+                            pseudo_gt['motion'] = motion_tensor.unsqueeze(0)  # Add batch dimension: (1, T, H, W, 1)
 
                     # Stack segmentation masks to (T, H, W, 1)
                     segmentation_masks = np.stack(composite_masks, axis=0)
@@ -1052,25 +1653,70 @@ def train_model(train_config=None, experiment_tracker=None):
                 # compute loss between prediction and pseudo_gt with optional confidence weighting
                 # Use FP32 for loss computation if enabled for better numerical stability
                 loss_dtype = torch.float32 if cfg.TRAINING.USE_FP32_FOR_LOSSES else dtype
-                
                 with torch.amp.autocast('cuda', dtype=loss_dtype):
                     if cfg.LOSS.USE_CONF_WEIGHTED_POINTS:
-                        point_map_loss, camera_pose_loss, conf_loss, normal_loss, segmentation_loss, motion_loss, frozen_decoder_loss = Pi3Losses.pi3_loss_with_confidence_weighting(
+                        point_map_loss, camera_pose_loss, conf_loss, normal_loss, segmentation_loss, motion_loss, flow_loss, frozen_decoder_loss = Pi3Losses.pi3_loss_with_confidence_weighting(
                             predictions, pseudo_gt, m_frames=cfg.MODEL.M, future_frame_weight=cfg.LOSS.FUTURE_FRAME_WEIGHT,
                             gamma=cfg.LOSS.CONF_GAMMA, alpha=cfg.LOSS.CONF_ALPHA, use_conf_weighted_points=True, gradient_weight=cfg.LOSS.GRADIENT_WEIGHT,
                             normal_loss_weight=cfg.LOSS.NORMAL_LOSS_WEIGHT,
-                            segformer=segformer, images=video_tensor_unaugmented_14
+                            segformer=segformer, images=video_tensor_unaugmented_14,
+                            motion_threshold=cfg.POINT_MOTION.MOTION_THRESHOLD
                         )
                     else:
-                        point_map_loss, camera_pose_loss, conf_loss, normal_loss, segmentation_loss, motion_loss, frozen_decoder_loss = Pi3Losses.pi3_loss(
+                        point_map_loss, camera_pose_loss, conf_loss, normal_loss, segmentation_loss, motion_loss, flow_loss, frozen_decoder_loss = Pi3Losses.pi3_loss(
                             predictions, pseudo_gt, m_frames=cfg.MODEL.M, future_frame_weight=cfg.LOSS.FUTURE_FRAME_WEIGHT, gradient_weight=cfg.LOSS.GRADIENT_WEIGHT,
                             normal_loss_weight=cfg.LOSS.NORMAL_LOSS_WEIGHT,
-                            segformer=segformer, images=video_tensor_unaugmented_14
+                            segformer=segformer, images=video_tensor_unaugmented_14,
+                            motion_threshold=cfg.POINT_MOTION.MOTION_THRESHOLD
                         )
                 
-                pi3_loss = (cfg.LOSS.PC_LOSS_WEIGHT * point_map_loss) + (cfg.LOSS.POSE_LOSS_WEIGHT * camera_pose_loss) + (cfg.LOSS.CONF_LOSS_WEIGHT * conf_loss) + (cfg.LOSS.NORMAL_LOSS_WEIGHT * normal_loss) + (cfg.LOSS.SEGMENTATION_LOSS_WEIGHT * segmentation_loss) + (cfg.LOSS.MOTION_LOSS_WEIGHT * motion_loss) + (cfg.LOSS.FROZEN_DECODER_SUPERVISION_WEIGHT * frozen_decoder_loss)
+                pi3_loss = (cfg.LOSS.PC_LOSS_WEIGHT * point_map_loss) + (cfg.LOSS.POSE_LOSS_WEIGHT * camera_pose_loss) + (cfg.LOSS.CONF_LOSS_WEIGHT * conf_loss) + (cfg.LOSS.NORMAL_LOSS_WEIGHT * normal_loss) + (cfg.LOSS.SEGMENTATION_LOSS_WEIGHT * segmentation_loss) + (cfg.LOSS.MOTION_LOSS_WEIGHT * motion_loss) + (cfg.LOSS.FLOW_LOSS_WEIGHT * flow_loss) + (cfg.LOSS.FROZEN_DECODER_SUPERVISION_WEIGHT * frozen_decoder_loss)
+                
+                # Backward pass for Pi3 loss (optimize main model only)
                 accelerator.backward(pi3_loss)
                 
+                # Separate distillation loss for distilled ViT only
+                distillation_loss = torch.tensor(0.0, device=device, dtype=dtype)
+                if distilled_vit is not None and cfg.MODEL.USE_DISTILLED_VIT:
+                    with torch.amp.autocast('cuda', dtype=dtype):
+                        # Get the last RGB frame fed into Pi3 (the last input frame)
+                        last_input_frame = video_tensor_unaugmented_14[0, cfg.MODEL.M-1]  # [3, H, W] - last input frame
+                        student_features = distilled_vit(last_input_frame.unsqueeze(0))  # [1, 3, H, W] -> single image
+                        
+                        # Extract teacher spatial features from the last input frame features
+                        teacher_features = {}
+                        
+                        # Get the teacher model features for the last input frame
+                        with torch.no_grad():
+                            # Extract spatial features for different modalities
+                            if 'point_features' in cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS:
+                                # Use features from the last input frame (M-1 index)
+                                last_input_idx = cfg.MODEL.M # - 1
+                                teacher_features['point_features'] = predictions['point_features'][last_input_idx:last_input_idx+1, :, :]  # [1, S, D]
+                            
+                            if 'camera_features' in cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS:
+                                # Use spatial features from the last input frame (M-1 index)  
+                                last_input_idx = cfg.MODEL.M - 1
+                                teacher_features['camera_features'] = predictions['camera_features'][last_input_idx:last_input_idx+1, :, :]  # [1, S, D]
+                                
+                            if 'autonomy_features' in cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS:
+                                # Use features from the last input frame (M-1 index)
+                                last_input_idx = cfg.MODEL.M - 1
+                                teacher_features['autonomy_features'] = predictions['autonomy_features'][last_input_idx:last_input_idx+1, :, :]  # [1, S, D]
+                        
+                        # Compute distillation loss
+                        if len(teacher_features) > 0:
+                            distillation_losses = distillation_loss_fn(student_features, teacher_features)
+                            distillation_loss = cfg.LOSS.DISTILLATION_LOSS_WEIGHT * distillation_losses['total_distillation_loss']
+                            print(f"   Step {global_step}: Distillation loss = {distillation_loss.item():.6f}")
+                            # Separate backward pass for distillation loss (optimize distilled ViT only)
+                            accelerator.backward(distillation_loss)
+                            
+                            # Critical: Clean up distillation variables to prevent memory accumulation
+                            del student_features, teacher_features, distillation_losses
+                            del last_input_frame
+                            torch.cuda.empty_cache()
+
                 if accelerator.sync_gradients:
                     if cfg.TRAINING.DETECT_NANS and check_model_parameters(train_model, "train_model", global_step):
                         print(f"🚨 NaN gradients detected at step {global_step}! Skipping optimizer step...")
@@ -1082,9 +1728,16 @@ def train_model(train_config=None, experiment_tracker=None):
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
+                
+                # Update distilled ViT if enabled
+                if distilled_vit is not None and cfg.MODEL.USE_DISTILLED_VIT:
+                    distilled_vit_optimizer.step()
+                    distilled_vit_scheduler.step()
+                    distilled_vit_optimizer.zero_grad()
 
             # Store loss value immediately and delete large tensors
-            current_loss = pi3_loss.detach().item()
+            current_loss = pi3_loss.detach().item()  # Only Pi3 loss for main training
+            current_distillation_loss = distillation_loss.detach().item()
             
             # Aggressive memory cleanup after optimization
             if accelerator.sync_gradients:
@@ -1104,18 +1757,21 @@ def train_model(train_config=None, experiment_tracker=None):
                 pseudo_gt['conf'][edge] = 0.0
 
                 for key in pseudo_gt.keys():
-                    if key not in ['features', 'pos']:
+                    if key not in ['features', 'pos', 'dino_features', 'pi3_features', 'conf_features', 'camera_features',
+                                   'point_features']:
                         if isinstance(pseudo_gt[key], torch.Tensor):
                             pseudo_gt[key] = pseudo_gt[key].cpu().numpy().squeeze(0)  # remove batch dimension
 
                 for key in predictions.keys():
-                    if key not in ['all_decoder_features', 'all_positional_encoding']:
+                    if key not in ['all_decoder_features', 'all_positional_encoding', 'dino_features',
+                                   'pi3_features', 'autonomy_features', 'conf_features', 'camera_features',
+                                   'point_features']:
                         if isinstance(predictions[key], torch.Tensor):
                             predictions[key] = predictions[key].clone().detach().cpu().numpy().squeeze(0)  # remove batch dimension
 
                 import matplotlib.pyplot as plt
                 import imageio
-
+                import cv2
                 
                 # === GSAM2 INFERENCE ===
                 # Limit visualizations to first 1000 steps to prevent memory accumulation
@@ -1182,13 +1838,9 @@ def train_model(train_config=None, experiment_tracker=None):
 
                         # Analyze object dynamics using CoTracker2 tracks and point maps
                         point_maps = pseudo_gt['points']
-                        # Convert class-aware masks to binary masks for analyze_object_dynamics
-                        binary_composite_masks = [(mask > 0).astype(np.uint8) for mask in composite_masks]
-                        print(f"🔍 Binary masks for analysis: {len(binary_composite_masks)} frames, values: {np.unique(binary_composite_masks[0])}")
-
                         if cfg.POINT_MOTION.TRAIN_MOTION:
                             try:
-                                dynamic_analysis, motion_maps, dynamic_masks = analyze_object_dynamics(results, pred_tracks, pred_visibility, point_maps, binary_composite_masks, verbose=True)
+                                dynamic_analysis, motion_maps, dynamic_masks = analyze_object_dynamics(results, pred_tracks, pred_visibility, point_maps, composite_masks, verbose=True)
                             except Exception as e:
                                 print(f"⚠️ analyze_object_dynamics visualization failed: {e}")
                                 dynamic_analysis = {}
@@ -1229,8 +1881,6 @@ def train_model(train_config=None, experiment_tracker=None):
                         print(f"⚠️ GSAM2 failed: {e}")
                 
                 # Synchronize all processes after GSAM2 inference
-                accelerator.wait_for_everyone()
-
                 # === RGB INPUT FRAMES VISUALIZATION ===
                 rgb_images_for_wandb = []
                 if cfg.WANDB.USE_WANDB:
@@ -1260,12 +1910,19 @@ def train_model(train_config=None, experiment_tracker=None):
                     
                     # Save corresponding RGB frame
                     if t < X_all_augmented.shape[1]:  # Safety check
-                        rgb_tensor = X_all_augmented[0, t].cpu()  # Shape: (C, H, W)
-                        rgb_img = np.transpose(rgb_tensor.numpy(), (1, 2, 0))  # Shape: (H, W, C)
-                        rgb_img = np.clip(rgb_img * 255, 0, 255).astype(np.uint8)
-                        imageio.imwrite(f"rgb_frame_{t}.png", rgb_img)
-                        # say it was saved
-                        print(f"💾 Saved depth and RGB frames: depth_frame_{t}_viridis.png, rgb_frame_{t}.png")
+                        # Save augmented RGB frame
+                        rgb_tensor_aug = X_all_augmented[0, t].cpu()  # Shape: (C, H, W)
+                        rgb_img_aug = np.transpose(rgb_tensor_aug.numpy(), (1, 2, 0))  # Shape: (H, W, C)
+                        rgb_img_aug = np.clip(rgb_img_aug * 255, 0, 255).astype(np.uint8)
+                        imageio.imwrite(f"rgb_frame_{t}_augmented.png", rgb_img_aug)
+                        
+                        # Save unaugmented RGB frame  
+                        rgb_tensor_orig = X_all[0, t].cpu()  # Shape: (C, H, W)
+                        rgb_img_orig = np.transpose(rgb_tensor_orig.numpy(), (1, 2, 0))  # Shape: (H, W, C)
+                        rgb_img_orig = np.clip(rgb_img_orig * 255, 0, 255).astype(np.uint8)
+                        imageio.imwrite(f"rgb_frame_{t}_original.png", rgb_img_orig)
+                        
+                        print(f"💾 Saved frames: depth_frame_{t}_viridis.png, rgb_frame_{t}_original.png, rgb_frame_{t}_augmented.png")
                     
                     # Prepare for WandB
                     if cfg.WANDB.USE_WANDB:
@@ -1476,61 +2133,49 @@ def train_model(train_config=None, experiment_tracker=None):
                 # === MOTION VISUALIZATION ===
                 motion_images_for_wandb = []
                 if 'motion' in predictions:
-                    pred_motion = predictions['motion']  # shape [B, T, H, W, 3] with 3D motion vectors
+                    pred_motion = predictions['motion']  # shape [B, T, H, W, 1] with binary motion mask logits
                     
                     # Handle tensor vs numpy array and remove batch dimension
                     if isinstance(pred_motion, torch.Tensor):
-                        pred_motion = pred_motion.cpu().detach().numpy()
+                        # Apply sigmoid to get probabilities
+                        pred_motion = torch.sigmoid(pred_motion).cpu().detach().numpy()
+                    else:
+                        # If numpy, apply sigmoid
+                        pred_motion = 1.0 / (1.0 + np.exp(-pred_motion))
                     
-                    # Remove batch dimension if present: [B, T, H, W, 3] -> [T, H, W, 3]
+                    # Remove batch dimension if present: [B, T, H, W, 1] -> [T, H, W, 1]
                     if pred_motion.ndim == 5 and pred_motion.shape[0] == 1:
                         pred_motion = pred_motion.squeeze(0)
                     
                     for t in range(min(pred_motion.shape[0], 8)):  # Limit to 8 frames
-                        motion_frame = pred_motion[t]  # (H, W, 3)
+                        motion_frame = pred_motion[t]  # (H, W, 1) - binary motion probability
                         
-                        # Compute motion magnitude for intensity visualization
-                        motion_magnitude = np.linalg.norm(motion_frame, axis=-1)  # (H, W)
+                        # Squeeze last dimension to get (H, W)
+                        if motion_frame.ndim == 3 and motion_frame.shape[-1] == 1:
+                            motion_frame = motion_frame.squeeze(-1)
                         
-                        # Normalize magnitude to [0, 1] for visualization
-                        if motion_magnitude.max() > 0:
-                            motion_magnitude_norm = motion_magnitude / motion_magnitude.max()
-                        else:
-                            motion_magnitude_norm = motion_magnitude
-                        
-                        # Create motion direction visualization using HSV color space
-                        # H = direction (angle), S = 1.0 (full saturation), V = magnitude
-                        motion_x = motion_frame[:, :, 0]  # X component
-                        motion_y = motion_frame[:, :, 1]  # Y component
-                        
-                        # Compute angle for hue (direction)
-                        motion_angle = np.arctan2(motion_y, motion_x)  # [-pi, pi]
-                        motion_hue = (motion_angle + np.pi) / (2 * np.pi)  # Normalize to [0, 1]
-                        
-                        # Create HSV image
-                        hsv_image = np.stack([
-                            motion_hue,                          # Hue = direction
-                            np.ones_like(motion_hue),           # Saturation = 1.0
-                            motion_magnitude_norm               # Value = magnitude
-                        ], axis=-1)
-                        
-                        # Convert HSV to RGB
+                        # Motion frame now contains probabilities [0, 1]
+                        # Create a heatmap visualization
                         import matplotlib.pyplot as plt
                         import matplotlib.colors as mcolors
-                        rgb_image = mcolors.hsv_to_rgb(hsv_image)
-                        rgb_uint8 = (rgb_image * 255).astype(np.uint8)
                         
-                        # Save to disk
+                        # Create red-to-blue colormap for motion (blue=static, red=moving)
+                        cmap = plt.get_cmap('coolwarm')
+                        motion_colored = cmap(motion_frame)
+                        motion_rgb = (motion_colored[:, :, :3] * 255).astype(np.uint8)
+                        
+                        # Save binary motion visualization to disk
                         filename = f"motion_pred_frame_{t}.png"
-                        imageio.imwrite(filename, rgb_uint8)
-                        print(f"🏃 Saved predicted motion for frame {t} to {filename}")
-                        print(f"   Motion magnitude range: {motion_magnitude.min():.3f} - {motion_magnitude.max():.3f}")
+                        imageio.imwrite(filename, motion_rgb)
+                        print(f"🏃 Saved predicted motion mask for frame {t} to {filename}")
+                        print(f"   Motion probability range: {motion_frame.min():.3f} - {motion_frame.max():.3f}")
+                        print(f"   Pixels with motion > 0.5: {(motion_frame > 0.5).sum()} / {motion_frame.size}")
                         
                         # Prepare for WandB
                         if cfg.WANDB.USE_WANDB:
                             from PIL import Image as PILImage
-                            pil_image = PILImage.fromarray(rgb_uint8)
-                            motion_images_for_wandb.append(wandb.Image(pil_image, caption=f"Motion Frame {t}"))
+                            pil_image = PILImage.fromarray(motion_rgb)
+                            motion_images_for_wandb.append(wandb.Image(pil_image, caption=f"Motion Mask Frame {t}"))
                     
                     # Also visualize ground truth motion if available
                     if 'motion' in pseudo_gt:
@@ -1550,37 +2195,31 @@ def train_model(train_config=None, experiment_tracker=None):
                         
                         gt_motion_images_for_wandb = []
                         for t in range(min(gt_motion.shape[0], 8)):  # Limit to 8 frames
-                            gt_frame = gt_motion[t]  # (H, W, 3)
+                            gt_frame = gt_motion[t]  # (H, W, 1) - already binary
                             
-                            # Compute motion magnitude and direction (same as predictions)
-                            gt_magnitude = np.linalg.norm(gt_frame, axis=-1)  # (H, W)
+                            # Squeeze last dimension to get (H, W)
+                            if gt_frame.ndim == 3 and gt_frame.shape[-1] == 1:
+                                gt_frame = gt_frame.squeeze(-1)
                             
-                            if gt_magnitude.max() > 0:
-                                gt_magnitude_norm = gt_magnitude / gt_magnitude.max()
-                            else:
-                                gt_magnitude_norm = gt_magnitude
+                            # GT is already binary (0 or 1)
+                            binary_gt_mask = gt_frame
                             
-                            # Motion direction
-                            gt_x = gt_frame[:, :, 0]
-                            gt_y = gt_frame[:, :, 1]
-                            gt_angle = np.arctan2(gt_y, gt_x)
-                            gt_hue = (gt_angle + np.pi) / (2 * np.pi)
-                            
-                            # HSV to RGB conversion
-                            gt_hsv = np.stack([gt_hue, np.ones_like(gt_hue), gt_magnitude_norm], axis=-1)
-                            gt_rgb = mcolors.hsv_to_rgb(gt_hsv)
-                            gt_rgb_uint8 = (gt_rgb * 255).astype(np.uint8)
+                            # Create same visualization as predictions
+                            cmap = plt.get_cmap('coolwarm')
+                            gt_motion_colored = cmap(binary_gt_mask)
+                            gt_motion_rgb = (gt_motion_colored[:, :, :3] * 255).astype(np.uint8)
                             
                             # Save to disk
                             filename = f"motion_gt_frame_{t}.png"
-                            imageio.imwrite(filename, gt_rgb_uint8)
-                            print(f"🏃 Saved ground truth motion for frame {t} to {filename}")
+                            imageio.imwrite(filename, gt_motion_rgb)
+                            print(f"🏃 Saved ground truth motion mask for frame {t} to {filename}")
+                            print(f"   GT pixels with motion: {binary_gt_mask.sum()} / {binary_gt_mask.size}")
                             
                             # Prepare for WandB
                             if cfg.WANDB.USE_WANDB:
                                 from PIL import Image as PILImage
-                                pil_image = PILImage.fromarray(gt_rgb_uint8)
-                                gt_motion_images_for_wandb.append(wandb.Image(pil_image, caption=f"GT Motion Frame {t}"))
+                                pil_image = PILImage.fromarray(gt_motion_rgb)
+                                gt_motion_images_for_wandb.append(wandb.Image(pil_image, caption=f"GT Motion Mask Frame {t}"))
                         
                         # Log GT motion to WandB
                         if cfg.WANDB.USE_WANDB and gt_motion_images_for_wandb:
@@ -1654,6 +2293,178 @@ def train_model(train_config=None, experiment_tracker=None):
                         print(f"💙 Saved {points_tensor.shape[0]} normal maps")
                     except Exception as e:
                         print(f"❌ Error computing normal maps: {e}")
+                
+                # === OPTICAL FLOW VISUALIZATION ===
+                flow_images_for_wandb = []
+                if 'flow' in predictions and cfg.MODEL.USE_FLOW_HEAD:
+                    try:
+                        pred_flow = predictions['flow']  # shape (T, H, W, 2) - (dx, dy) per pixel
+                        
+                        # Also get ground truth flow if available
+                        gt_flow = None
+                        if 'flow' in pseudo_gt:
+                            if isinstance(pseudo_gt['flow'], torch.Tensor):
+                                gt_flow = pseudo_gt['flow'].cpu().numpy()
+                            else:
+                                gt_flow = pseudo_gt['flow']
+                            
+                            # Remove batch dimension if present
+                            if gt_flow.ndim == 5 and gt_flow.shape[0] == 1:
+                                gt_flow = gt_flow.squeeze(0)
+                        
+                        # Visualize flow for each frame transition
+                        for t in range(min(pred_flow.shape[0] - 1, 6)):  # T-1 transitions, limit to 6
+                            # Predicted flow
+                            flow = pred_flow[t]  # (H, W, 2) - flow in pixel units
+                            
+                            # Flow is already in pixel units (no denormalization needed)
+                            flow_pixels = flow
+                            
+                            # Compute flow magnitude and angle
+                            magnitude = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+                            angle = np.arctan2(flow[..., 1], flow[..., 0])
+                            
+                            # HSV visualization (hue=direction, saturation=1, value=magnitude)
+                            h, w = flow.shape[:2]
+                            hsv = np.zeros((h, w, 3), dtype=np.uint8)
+                            hsv[..., 0] = ((angle + np.pi) / (2 * np.pi) * 179).astype(np.uint8)  # Hue (angle)
+                            hsv[..., 1] = 255  # Saturation (always full)
+                            # Flow is now in pixel units, typical values are 0-200 pixels movement
+                            # Values > 200 indicate very fast motion
+                            # Clip to [0, 200] range for visualization then map to [0, 255]
+                            mag_norm = np.clip(magnitude / 200.0, 0, 1)  # Divide by 200 to visualize up to 200 pixels
+                            hsv[..., 2] = (mag_norm * 255).astype(np.uint8)  # Value (magnitude)
+                            
+                            # Convert to RGB
+                            import cv2
+                            flow_rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+                            
+                            # Save predicted flow
+                            filename = f"flow_pred_frame_{t}_to_{t+1}.png"
+                            imageio.imwrite(filename, flow_rgb)
+                            print(f"🌊 Saved predicted flow for frames {t}→{t+1} to {filename}")
+                            print(f"   Flow magnitude range (pixels): {magnitude.min():.3f} - {magnitude.max():.3f}")
+                            print(f"   Flow component range (pixels): {flow_pixels[..., 0].min():.1f} - {flow_pixels[..., 0].max():.1f} (x), {flow_pixels[..., 1].min():.1f} - {flow_pixels[..., 1].max():.1f} (y)")
+                            
+                            # Prepare for WandB
+                            if cfg.WANDB.USE_WANDB:
+                                from PIL import Image as PILImage
+                                pil_image = PILImage.fromarray(flow_rgb)
+                                flow_images_for_wandb.append(wandb.Image(pil_image, caption=f"Flow Pred {t}→{t+1}"))
+                            
+                            # Save ground truth flow if available
+                            if gt_flow is not None and t < gt_flow.shape[0]:
+                                gt_flow_t = gt_flow[t]  # (H, W, 2) - flow in pixel units
+                                
+                                # GT flow is already in pixel units (no denormalization needed)
+                                gt_flow_pixels = gt_flow_t
+                                
+                                # Same visualization for GT
+                                gt_magnitude = np.sqrt(gt_flow_t[..., 0]**2 + gt_flow_t[..., 1]**2)
+                                gt_angle = np.arctan2(gt_flow_t[..., 1], gt_flow_t[..., 0])
+                                
+                                gt_hsv = np.zeros((h, w, 3), dtype=np.uint8)
+                                gt_hsv[..., 0] = ((gt_angle + np.pi) / (2 * np.pi) * 179).astype(np.uint8)
+                                gt_hsv[..., 1] = 255
+                                # Use same normalization as predictions for consistent visualization
+                                gt_mag_norm = np.clip(gt_magnitude / 200.0, 0, 1)  # Divide by 200 to visualize up to 200 pixels
+                                gt_hsv[..., 2] = (gt_mag_norm * 255).astype(np.uint8)
+                                
+                                gt_flow_rgb = cv2.cvtColor(gt_hsv, cv2.COLOR_HSV2RGB)
+                                
+                                # Save GT flow
+                                gt_filename = f"flow_gt_frame_{t}_to_{t+1}.png"
+                                imageio.imwrite(gt_filename, gt_flow_rgb)
+                                print(f"🌊 Saved ground truth flow for frames {t}→{t+1} to {gt_filename}")
+                                print(f"   GT flow magnitude range (pixels): {gt_magnitude.min():.3f} - {gt_magnitude.max():.3f}")
+                                print(f"   GT flow component range (pixels): {gt_flow_pixels[..., 0].min():.1f} - {gt_flow_pixels[..., 0].max():.1f} (x), {gt_flow_pixels[..., 1].min():.1f} - {gt_flow_pixels[..., 1].max():.1f} (y)")
+                                
+                                if cfg.WANDB.USE_WANDB:
+                                    gt_pil_image = PILImage.fromarray(gt_flow_rgb)
+                                    flow_images_for_wandb.append(wandb.Image(gt_pil_image, caption=f"Flow GT {t}→{t+1}"))
+                        
+                        # Log flow to WandB
+                        if cfg.WANDB.USE_WANDB and flow_images_for_wandb:
+                            wandb.log({"visualizations/flow": flow_images_for_wandb}, step=global_step)
+                            
+                    except Exception as e:
+                        print(f"❌ Error visualizing flow: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                # === MOTION DETECTION FROM OPTICAL FLOW ===
+                motion_images_for_wandb = []
+                if cfg.MOTION_DETECTION.ENABLE and 'flow' in predictions and 'local_points' in predictions:
+                    from utils.flow_motion import FlowMotionDetector
+                    from utils.dynamic_objects import DynamicObjectTracker
+                    from utils.motion_visualization import MotionVisualizer
+                    
+                    # Initialize motion detection components
+                    motion_detector = FlowMotionDetector(motion_threshold=cfg.MOTION_DETECTION.MOTION_THRESHOLD)
+                    motion_visualizer = MotionVisualizer(max_motion_display=cfg.MOTION_DETECTION.MAX_MOTION_DISPLAY)
+                    
+                    # Get flow and depth data
+                    pred_flow = predictions['flow']  # (T, H, W, 2)
+                    points = predictions['points']  # (T, H, W, 3) - world coordinates
+                    depth_maps = points[..., 2]  # (T, H, W) - Z component is depth
+                    
+                    # Compute 3D motion for each frame transition
+                    for t in range(min(pred_flow.shape[0] - 1, 6)):  # T-1 transitions, limit to 6
+                        flow_t = pred_flow[t]  # (H, W, 2)
+                        depth_current = depth_maps[t]  # (H, W)
+                        depth_next = depth_maps[t + 1]  # (H, W)
+                        
+                        # Use simple intrinsics (can be made configurable)
+                        H, W = flow_t.shape[:2]
+                        fx = fy = W  # Simple assumption
+                        cx, cy = W/2, H/2
+                        intrinsics = np.array([fx, fy, cx, cy])
+                        
+                        # Convert flow to 3D motion
+                        motion_3d = motion_detector.flow_to_3d_motion(
+                            flow=flow_t,
+                            depth_current=depth_current,
+                            depth_next=depth_next,
+                            intrinsics=intrinsics,
+                            denormalize_flow=False
+                        )
+                        
+                        # Detect dynamic pixels
+                        dynamic_mask = motion_detector.detect_moving_pixels(motion_3d)
+                        
+                        # Save motion visualizations
+                        if cfg.MOTION_DETECTION.SAVE_MOTION_VISUALIZATIONS:
+                            # Save 3D motion field
+                            motion_stats = motion_visualizer.save_motion_field(
+                                motion_3d, f"motion_field_frame_{t}_to_{t+1}.png"
+                            )
+                            
+                            # Save motion as HSV
+                            motion_visualizer.save_motion_hsv(
+                                motion_3d, f"motion_hsv_frame_{t}_to_{t+1}.png"
+                            )
+                            
+                            # Save dynamic mask
+                            mask_stats = motion_visualizer.save_dynamic_masks(
+                                dynamic_mask, f"dynamic_mask_frame_{t}_to_{t+1}.png"
+                            )
+                            
+                            print(f"🏃 Saved motion detection for frames {t}→{t+1}")
+                            print(f"   Motion range: {motion_stats['min_motion']:.3f} - {motion_stats['max_motion']:.3f} m")
+                            print(f"   Dynamic pixels: {mask_stats['dynamic_pixels']} / {mask_stats['total_pixels']} ({mask_stats['dynamic_ratio']:.1%})")
+                        
+                        # Prepare WandB images
+                        if cfg.WANDB.USE_WANDB:
+                            wandb_images = motion_visualizer.create_wandb_images(motion_3d, dynamic_mask, {})
+                            
+                            motion_images_for_wandb.extend([
+                                wandb.Image(wandb_images['motion_magnitude'], caption=f"Motion Magnitude {t}→{t+1}"),
+                                wandb.Image(wandb_images['dynamic_masks'], caption=f"Dynamic Mask {t}→{t+1}")
+                            ])
+                    
+                    # Log motion detection to WandB
+                    if cfg.WANDB.USE_WANDB and motion_images_for_wandb:
+                        wandb.log({"visualizations/motion_detection": motion_images_for_wandb}, step=global_step)
                 
                 # === CAMERA TRAJECTORY VISUALIZATION ===
                 camera_images_for_wandb = []
@@ -1765,19 +2576,24 @@ def train_model(train_config=None, experiment_tracker=None):
                 current_lr = scheduler.get_last_lr()[0]
                 
                 # TensorBoard logging
-                writer.add_scalar("Loss/Train", pi3_loss.item(), global_step)
+                writer.add_scalar("Loss/Train", current_loss, global_step)
+                writer.add_scalar("Loss/Pi3_Loss", pi3_loss.item(), global_step)
+                writer.add_scalar("Loss/Distillation_Loss", current_distillation_loss, global_step)
                 writer.add_scalar("Learning_Rate", current_lr, global_step)
                 
                 # Weights & Biases logging
                 if cfg.WANDB.USE_WANDB:
                     log_dict = {
-                        "train/total_loss": pi3_loss.item(),
+                        "train/total_loss": current_loss,
+                        "train/pi3_loss": pi3_loss.item(),
+                        "train/distillation_loss": current_distillation_loss,
                         "train/point_map_loss": point_map_loss.item(),
                         "train/camera_pose_loss": camera_pose_loss.item(),
                         "train/conf_loss": conf_loss.item() if torch.is_tensor(conf_loss) else conf_loss,
                         "train/normal_loss": normal_loss.item() if torch.is_tensor(normal_loss) else normal_loss,
                         "train/segmentation_loss": segmentation_loss.item() if torch.is_tensor(segmentation_loss) else segmentation_loss,
                         "train/motion_loss": motion_loss.item() if torch.is_tensor(motion_loss) else motion_loss,
+                        "train/flow_loss": flow_loss.item() if torch.is_tensor(flow_loss) else flow_loss,
                         "train/frozen_decoder_supervision_loss": frozen_decoder_loss.item() if torch.is_tensor(frozen_decoder_loss) else frozen_decoder_loss,
                         "train/learning_rate": current_lr,
                         "train/epoch": epoch,
@@ -1790,11 +2606,16 @@ def train_model(train_config=None, experiment_tracker=None):
                     run.log(log_dict, step=global_step)
                 
                 postfix_dict = {
-                    'loss': f'{pi3_loss.item():.6f}',
+                    'loss': f'{current_loss:.6f}',
+                    'pi3': f'{pi3_loss.item():.6f}',
                     'lr': f'{current_lr:.2e}',
                     'best': f'{best_loss:.6f}',
                     'val_best': f'{best_val_loss:.6f}' if val_dataloader else 'N/A'
                 }
+                
+                # Add distillation loss to postfix if enabled
+                if cfg.MODEL.USE_DISTILLED_VIT:
+                    postfix_dict['distill'] = f'{current_distillation_loss:.6f}'
                 
                 # Add segmentation loss to postfix if segmentation head is enabled
                 if cfg.MODEL.USE_SEGMENTATION_HEAD and segmentation_loss != 0.0:
@@ -1822,6 +2643,7 @@ def train_model(train_config=None, experiment_tracker=None):
                 writer.add_scalar("Loss/Validation", val_metrics['val_loss'], global_step)
                 writer.add_scalar("Loss/Val_Point", val_metrics['val_point_loss'], global_step)
                 writer.add_scalar("Loss/Val_Camera", val_metrics['val_camera_loss'], global_step)
+                writer.add_scalar("Loss/Val_Flow", val_metrics['val_flow_loss'], global_step)
                 writer.add_scalar("Loss/Val_Frozen_Decoder", val_metrics['val_frozen_decoder_loss'], global_step)
                 
                 # Log unweighted validation losses for tracking actual performance
@@ -1837,6 +2659,7 @@ def train_model(train_config=None, experiment_tracker=None):
                         "val/point_map_loss": val_metrics['val_point_loss'],
                         "val/camera_pose_loss": val_metrics['val_camera_loss'],
                         "val/conf_loss": val_metrics['val_conf_loss'],
+                        "val/flow_loss": val_metrics['val_flow_loss'],
                         "val/frozen_decoder_loss": val_metrics['val_frozen_decoder_loss'],
                         # Unweighted validation losses for tracking actual performance
                         "val/unweighted_l1_points": val_metrics['val_unweighted_l1_points'],
@@ -1853,7 +2676,7 @@ def train_model(train_config=None, experiment_tracker=None):
                 print(f"   Pose Loss (unweighted): {val_metrics['val_unweighted_pose_loss']:.6f}")
                 
                 # Early stopping check
-                if val_metrics['val_loss'] < best_val_loss:
+                if True or val_metrics['val_loss'] < best_val_loss:
                     best_val_loss = val_metrics['val_loss']
                     steps_without_improvement = 0
                     
@@ -1864,6 +2687,11 @@ def train_model(train_config=None, experiment_tracker=None):
                         'model_state_dict': accelerator.unwrap_model(train_model).state_dict(),
                         'config': cfg
                     }
+                    
+                    # Add distilled ViT state dict if enabled
+                    if distilled_vit is not None and cfg.MODEL.USE_DISTILLED_VIT:
+                        best_val_checkpoint['distilled_vit_state_dict'] = accelerator.unwrap_model(distilled_vit).state_dict()
+                        print(f"📝 Including distilled ViT state dict in validation checkpoint")
                     
                     best_val_model_path = os.path.join(cfg.OUTPUT.CHECKPOINT_DIR, 'best_val_model.pt')
                     print(f"📝 Saving best validation model locally to: {best_val_model_path}")
@@ -1913,7 +2741,7 @@ def train_model(train_config=None, experiment_tracker=None):
                 recent_loss = running_loss / cfg.LOGGING.SAVE_FREQ
                 
                 # Check if this is the best loss so far
-                if recent_loss < best_loss:
+                if True or recent_loss < best_loss:
                     best_loss = recent_loss
                     
                     # Save the best model
@@ -1923,6 +2751,23 @@ def train_model(train_config=None, experiment_tracker=None):
                         'model_state_dict': accelerator.unwrap_model(train_model).state_dict(),
                         'config': cfg
                     }
+                    
+                    # Add distilled ViT state dict if enabled
+                    if distilled_vit is not None and cfg.MODEL.USE_DISTILLED_VIT:
+                        checkpoint['distilled_vit_state_dict'] = accelerator.unwrap_model(distilled_vit).state_dict()
+                        print(f"📝 Including distilled ViT state dict in checkpoint")
+                        
+                        # Also save standalone distilled ViT checkpoint
+                        distilled_vit_checkpoint = {
+                            'epoch': epoch,
+                            'global_step': global_step,
+                            'model_state_dict': accelerator.unwrap_model(distilled_vit).state_dict(),
+                            'config': cfg.MODEL.DISTILLED_VIT,
+                            'teacher_model_name': cfg.MODEL.ENCODER_NAME
+                        }
+                        distilled_vit_path = os.path.join(cfg.OUTPUT.CHECKPOINT_DIR, 'best_distilled_vit.pt')
+                        torch.save(distilled_vit_checkpoint, distilled_vit_path)
+                        print(f"📝 Standalone distilled ViT saved to: {distilled_vit_path}")
                     
                     best_model_path = os.path.join(cfg.OUTPUT.CHECKPOINT_DIR, 'best_model.pt')
                     print(f"📝 Saving best training model locally to: {best_model_path}")
@@ -1937,6 +2782,14 @@ def train_model(train_config=None, experiment_tracker=None):
                             s3_path = f"s3://{cfg.OUTPUT.S3_BUCKET}/{cfg.OUTPUT.S3_PREFIX}/{s3_filename}"
                             save_state_dict_to_s3(checkpoint, s3_path)
                             upload_success = True
+                            
+                            # Also upload standalone distilled ViT if enabled
+                            if distilled_vit is not None and cfg.MODEL.USE_DISTILLED_VIT:
+                                distilled_s3_filename = f"{actual_run_name}_best_distilled_vit.pt" if actual_run_name else "best_distilled_vit.pt"
+                                distilled_s3_path = f"s3://{cfg.OUTPUT.S3_BUCKET}/{cfg.OUTPUT.S3_PREFIX}/{distilled_s3_filename}"
+                                save_state_dict_to_s3(distilled_vit_checkpoint, distilled_s3_path)
+                                print(f"☁️ Distilled ViT uploaded to: {distilled_s3_path}")
+                                
                         except Exception as e:
                             print(f"❌ Failed to upload best model to S3: {e}")
                             upload_success = False
