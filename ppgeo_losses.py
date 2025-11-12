@@ -208,6 +208,7 @@ class PPGeoLoss(nn.Module):
         for scale in self.scales:
             h = height // (2 ** scale)
             w = width // (2 ** scale)
+
             
             self.backproject_depth[scale] = BackprojectDepth(batch_size, h, w)
             self.project_3d[scale] = Project3D(batch_size, h, w)
@@ -250,25 +251,21 @@ class PPGeoLoss(nn.Module):
         
         return K
     
-    def forward(self, outputs: Dict[str, torch.Tensor], inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, outputs: Dict[str, torch.Tensor], inputs: Dict, stage: int = 1) -> Dict[str, torch.Tensor]:
         """Compute PPGeo losses."""
-        images = inputs["images"]  # [B, 3, 3, H, W]
-        B, num_frames, C, H, W = images.shape
-        device = images.device
+        # Get frame images from PPGeo format
+        img_curr = inputs[("color", 0, 0)]  # [B, 3, H, W]
+        B, C, H, W = img_curr.shape
+        device = img_curr.device
         
         # Initialize projection layers if needed
         if not hasattr(self, '_initialized') or not self._initialized:
             self.init_projection_layers(B, H, W, device)
             self._initialized = True
         
-        # Extract frame images
-        img_prev = images[:, 0]  # [B, 3, H, W]
-        img_curr = images[:, 1]  # [B, 3, H, W]
-        img_next = images[:, 2]  # [B, 3, H, W]
-        
-        # Build camera matrix from predicted intrinsics
-        K = self.build_camera_matrix(outputs[("intrinsics", 0)], H, W)
-        inv_K = torch.linalg.pinv(K)
+        # Get camera matrices (should be added to inputs by model)
+        K = inputs[("K", 0)]
+        inv_K = inputs[("inv_K", 0)]
         
         # Build transformation matrices
         T_prev = transformation_from_parameters(
@@ -279,52 +276,63 @@ class PPGeoLoss(nn.Module):
         total_loss = 0
         losses = {}
         
-        for scale in self.scales:
+        # Use only scale 0 for Stage 2, all scales for Stage 1
+        active_scales = [0] if stage == 2 else self.scales
+
+        
+        for scale in active_scales:
             loss = 0
             reprojection_losses = []
             
-            # Get disparity and convert to depth
-            disp = outputs[("disp", scale)]
-            _, depth = disp_to_depth(disp, 0.1, 100.0)
+            # Get depth from outputs
+            depth = outputs[("disp", scale)]
+            # Clamp depth values to reasonable range
+            depth = torch.clamp(depth, 0.1, 100.0)
             
-            # Resize depth to full resolution for projection
+            # Get the appropriate scale's K matrix and backproject layers
+            K_scale = inputs[("K", scale)]
+            inv_K_scale = inputs[("inv_K", scale)]
+            
+            # Resize depth to match the scale if needed
             if scale > 0:
-                depth_full = F.interpolate(depth, [H, W], mode="bilinear", align_corners=False)
+                scale_h = H // (2 ** scale)
+                scale_w = W // (2 ** scale)
+                depth_resized = F.interpolate(depth, size=(scale_h, scale_w), mode='bilinear', align_corners=False)
             else:
-                depth_full = depth
+                # resize to H, W
+                depth_resized = F.interpolate(depth, size=(H, W), mode='bilinear', align_corners=False)
             
-            # Project current frame to adjacent frames
+            # Project current frame to adjacent frames using the correct scale
             for frame_id, T in [(-1, T_prev), (1, T_next)]:
-                # Backproject depth
-                cam_points = self.backproject_depth[0](depth_full, inv_K)
+                # Backproject depth using the appropriate scale's layer
+                cam_points = self.backproject_depth[scale](depth_resized, inv_K_scale)
                 
-                # Project to target frame
-                pix_coords = self.project_3d[0](cam_points, K, T)
+                # Project to target frame using the appropriate scale's layer
+                pix_coords = self.project_3d[scale](cam_points, K_scale, T)
                 
-                # Sample target frame
-                if frame_id == -1:
-                    target_img = img_prev
-                else:
-                    target_img = img_next
+                # Sample target frame from inputs at the appropriate scale
+                target_img = inputs[("color", frame_id, scale)]
                 
                 # Sample the target image at projected coordinates
                 projected_img = F.grid_sample(
                     target_img, pix_coords, padding_mode="border", align_corners=True)
                 
+                # Get current frame at the appropriate scale
+                img_curr_scale = inputs[("color", 0, scale)]
+                
                 # Compute reprojection loss
-                reprojection_loss = self.compute_reprojection_loss(projected_img, img_curr)
+                reprojection_loss = self.compute_reprojection_loss(projected_img, img_curr_scale)
                 reprojection_losses.append(reprojection_loss)
             
             # Combine reprojection losses
             reprojection_losses = torch.cat(reprojection_losses, 1)
             
-            # Compute identity reprojection (for masking)
+            # Compute identity reprojection (for masking) at the appropriate scale
             identity_losses = []
+            img_curr_scale = inputs[("color", 0, scale)]
             for frame_id in [-1, 1]:
-                if frame_id == -1:
-                    identity_loss = self.compute_reprojection_loss(img_prev, img_curr)
-                else:
-                    identity_loss = self.compute_reprojection_loss(img_next, img_curr)
+                identity_img = inputs[("color", frame_id, scale)]
+                identity_loss = self.compute_reprojection_loss(identity_img, img_curr_scale)
                 identity_losses.append(identity_loss)
             
             identity_losses = torch.cat(identity_losses, 1)
@@ -344,16 +352,18 @@ class PPGeoLoss(nn.Module):
             loss += to_optimise.mean()
             
             # Smoothness loss
-            mean_disp = disp.mean(2, True).mean(3, True)
-            norm_disp = disp / (mean_disp + 1e-7)
-            smooth_loss = get_smooth_loss(norm_disp, img_curr)
+            mean_depth = depth.mean(2, True).mean(3, True)
+            norm_depth = depth / (mean_depth + 1e-7)
+            # make H W same for norm_depth and img_curr_scale. Make the shapes match
+            norm_depth = F.interpolate(norm_depth, size=img_curr_scale.shape[2:], mode='bilinear', align_corners=False)
+            smooth_loss = get_smooth_loss(norm_depth, img_curr_scale)
             
             loss += 1e-3 * smooth_loss / (2 ** scale)
             
             total_loss += loss
             losses[f"loss_scale_{scale}"] = loss
         
-        total_loss /= len(self.scales)
+        total_loss /= len(active_scales)
         
         losses.update({
             "total_loss": total_loss,

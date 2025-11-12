@@ -33,17 +33,29 @@ class PPGeoDataset(Dataset):
         self.img_size = img_size
         self.is_train = is_train
         self.augment = augment and is_train
-        
         # Use existing YouTube dataset to get video sequences
         self.base_dataset = YouTubeS3Dataset(
+            bucket_name="research-datasets",
             root_prefix=root_prefix,
+            m=3,  # Input frames
+            n=0,  # Target frames (we just need sequences of 3 frames)
+            transform=None,  # We'll handle transforms ourselves
             cache_dir=cache_dir,
-            sequence_length=3,  # We need at least 3 consecutive frames
-            img_size=img_size,
-            is_train=is_train,
             frame_sampling_rate=frame_sampling_rate,
-            max_samples=max_samples
+            min_sequence_length=50,
+            skip_frames=300,  # Skip first 300 frames like in train_cluster.py
+            max_workers=8
         )
+        
+        # Limit dataset size if requested
+        if max_samples > 0 and len(self.base_dataset) > max_samples:
+            from torch.utils.data import Subset
+            import random
+            indices = list(range(len(self.base_dataset)))
+            random.shuffle(indices)
+            indices = indices[:max_samples]
+            self.base_dataset = Subset(self.base_dataset, indices)
+            print(f"🎯 Limited PPGeo dataset to {max_samples} samples")
         
         # Setup transforms
         self.setup_transforms()
@@ -74,56 +86,96 @@ class PPGeoDataset(Dataset):
     def __len__(self):
         return len(self.base_dataset)
     
-    def preprocess_image(self, image: Image.Image, apply_aug: bool = False) -> torch.Tensor:
-        """Preprocess a single image."""
-        # Crop to remove car hood
-        image = self.crop_transform(image)
+    def preprocess_ppgeo_style(self, inputs, color_aug):
+        """Preprocess images in PPGeo style with multi-scale resizing."""
+        height, width = 160, 320
+        num_scales = 4
+        interp = T.InterpolationMode.BICUBIC
+        to_tensor = T.ToTensor()
         
-        # Resize
-        image = self.resize(image)
+        # Create resize transforms for each scale
+        resize_transforms = {}
+        for i in range(num_scales):
+            s = 2 ** i
+            resize_transforms[i] = T.Resize((height // s, width // s), interpolation=interp)
         
-        # Apply color augmentation if requested
-        if apply_aug and self.augment:
-            image = self.color_aug(image)
+        # Resize color images to the required scales
+        for k in list(inputs.keys()):
+            if "color" in k and k[2] == -1:  # Base scale images
+                frame_id = k[1]
+                base_image = inputs[k]
+                
+                # Create images at all scales
+                for i in range(num_scales):
+                    inputs[("color", frame_id, i)] = resize_transforms[i](base_image)
         
-        # Convert to tensor and normalize
-        image = self.to_tensor(image)
-        # Note: Skip normalization for PPGeo as it expects [0,1] range
-        
-        return image
+        # Convert to tensors and apply augmentation
+        for k in list(inputs.keys()):
+            if "color" in k and k[2] >= 0:  # Scaled images
+                frame_id, scale = k[1], k[2]
+                image = inputs[k]
+                
+                # Convert to tensor
+                inputs[("color", frame_id, scale)] = to_tensor(image)
+                
+                # Apply augmentation and convert to tensor
+                inputs[("color_aug", frame_id, scale)] = to_tensor(color_aug(image))
     
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Dict:
         """
-        Get frame triplet for PPGeo training.
+        Get frame triplet for PPGeo training in the original PPGeo format.
         
         Returns:
-            Dictionary with:
-            - 'images': [3, 3, H, W] tensor (prev, curr, next frames)
-            - 'idx': sample index
+            Dictionary with PPGeo-style keys:
+            - ("color", frame_id, scale): PIL image for frame_id at scale
+            - ("color_aug", frame_id, scale): Augmented PIL image for frame_id at scale
         """
         # Get sequence from base dataset
-        sequence_data = self.base_dataset[idx]
-        images = sequence_data['images']  # [T, 3, H, W] where T >= 3
+        cur_frames, future_frames, metadata = self.base_dataset[idx]
+        images = cur_frames  # [T, 3, H, W] where T >= 3
         
-        # Extract first 3 frames as triplet
-        img_tensors = []
+        # PPGeo constants
+        frame_ids = [-1, 0, 1]  # prev, curr, next
+        num_scales = len([0, 1, 2, 3])
         
-        for i in range(3):
+        inputs = {}
+        
+        # Convert frames back to PIL images and apply initial preprocessing
+        pil_images = {}
+        for i, frame_id in enumerate(frame_ids):
             # Convert tensor back to PIL for consistent preprocessing
             img_tensor = images[i]  # [3, H, W]
             img_pil = T.ToPILImage()(img_tensor)
             
-            # Preprocess with augmentation for training
-            processed_img = self.preprocess_image(img_pil, apply_aug=self.is_train)
-            img_tensors.append(processed_img)
+            # Crop to remove car hood (like original PPGeo)
+            pil_images[frame_id] = img_pil
+            
+            # Store base image at scale -1 (will be processed later)
+            inputs[("color", frame_id, -1)] = img_pil
         
-        # Stack into [3, 3, H, W] format
-        frame_triplet = torch.stack(img_tensors, dim=0)
+        # Setup color augmentation
+        if self.is_train:
+            color_aug = T.Compose([
+                T.RandomApply([
+                    T.ColorJitter(brightness=(0.8, 1.2), contrast=(0.8, 1.2), 
+                                saturation=(0.8, 1.2), hue=(-0.1, 0.1))
+                ], p=0.8),
+                T.RandomGrayscale(p=0.2),
+            ])
+        else:
+            color_aug = lambda x: x
         
-        return {
-            'images': frame_triplet,  # [3, 3, H, W] - (prev, curr, next)
-            'idx': idx
-        }
+
+        # Process for all scales like original PPGeo
+        self.preprocess_ppgeo_style(inputs, color_aug)
+
+        # Remove the scale -1 images (original PPGeo does this)
+        for frame_id in frame_ids:
+            del inputs[("color", frame_id, -1)]
+            if ("color_aug", frame_id, -1) in inputs:
+                del inputs[("color_aug", frame_id, -1)]
+        
+        return inputs
 
 
 class PPGeoDatasetSimple(Dataset):

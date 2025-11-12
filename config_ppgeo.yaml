@@ -38,6 +38,7 @@ TRAINING:
   NUM_EPOCHS: 30
   LEARNING_RATE: 1e-4
   MAX_GRAD_NORM: 1.0
+  GRAD_ACCUM_STEPS: 4  # Simulate 4x larger batch size
 
 # Loss weights  
 LOSS:
@@ -55,6 +56,9 @@ LOGGING:
 # Output parameters
 OUTPUT:
   CHECKPOINT_DIR: "checkpoints_ppgeo"
+
+# Pre-trained checkpoint
+DEPTHANYTHING_CHECKPOINT: "/home/matthew_strong/Desktop/autonomy-wild/Depth-Anything-V2/metric_depth/checkpoints/depth_anything_v2_metric_vkitti_vitl.pth"
 
 # W&B parameters
 WANDB:
