@@ -1,0 +1,70 @@
+# PPGeo Stage 2 Training Configuration  
+# Structure and Motion learning with frozen Stage 1 model
+
+# Dataset parameters (use existing YouTube S3 dataset)
+DATASET:
+  # YouTube S3 dataset configuration  
+  USE_YOUTUBE: True
+  YOUTUBE_ROOT_PREFIX: "openDV-YouTube/full_images/"
+  YOUTUBE_CACHE_DIR: "./youtube_cache"
+  YOUTUBE_REFRESH_CACHE: False
+  YOUTUBE_SKIP_FRAMES: 300
+  YOUTUBE_MIN_SEQUENCE_LENGTH: 50
+  YOUTUBE_MAX_WORKERS: 16
+  MAX_SAMPLES: 10000  # Smaller for initial testing
+  FRAME_SAMPLING_RATE: 5  # 2Hz from 10Hz videos
+  
+  BATCH_SIZE: 8
+  VAL_SPLIT: 0.1
+  
+  # PPGeo image settings
+  IMG_HEIGHT: 160
+  IMG_WIDTH: 320
+
+# Model parameters
+MODEL:
+  ENCODER_NAME: "dinov3"  # Use DinOV3 ViT encoder
+  
+# PPGeo specific parameters
+PPGEO:
+  STAGE: 2  # Stage 2: structure + motion training
+  FRAME_IDS: [-1, 0, 1]  # Previous, current, next frames
+  SCALES: [0]   # Only full resolution for Stage 2
+  MIN_DEPTH: 0.1
+  MAX_DEPTH: 100.0
+
+# Stage 1 checkpoint to load (required for Stage 2)
+STAGE1_CHECKPOINT: "checkpoints/ppgeo_stage1_step_1800.pt"
+
+# Pre-trained checkpoint (also used in Stage 2 for frozen model)
+DEPTHANYTHING_CHECKPOINT: "/home/matthew_strong/Desktop/autonomy-wild/Depth-Anything-V2/metric_depth/checkpoints/depth_anything_v2_metric_vkitti_vitl.pth"
+
+# Training parameters
+TRAINING:
+  NUM_EPOCHS: 20  # Fewer epochs for Stage 2
+  LEARNING_RATE: 5e-5  # Lower learning rate for Stage 2
+  MAX_GRAD_NORM: 1.0
+  GRAD_ACCUM_STEPS: 4  # Simulate 4x larger batch size
+
+# Loss weights  
+LOSS:
+  PHOTOMETRIC_WEIGHT: 1.0
+  SMOOTHNESS_WEIGHT: 0.001
+  
+# Validation parameters
+VALIDATION:
+  VAL_FREQ: 3  # Validate every N epochs
+
+# Logging parameters
+LOGGING:
+  LOG_FREQ: 50
+
+# Output parameters
+OUTPUT:
+  CHECKPOINT_DIR: "checkpoints_ppgeo"
+
+# W&B parameters
+WANDB:
+  PROJECT: "ppgeo-dinov3"
+  USE_WANDB: True
+  RUN_NAME: "ppgeo-dinov3-dpt-stage2"
