@@ -1,0 +1,62 @@
+# PPGeo ResNet-152 Training Configuration
+# Self-supervised depth and pose learning with ResNet-152 encoder (largest ResNet)
+
+# Dataset parameters (use existing YouTube S3 dataset)
+DATASET:
+  # YouTube S3 dataset configuration  
+  USE_YOUTUBE: True
+  YOUTUBE_ROOT_PREFIX: "openDV-YouTube/full_images/"
+  YOUTUBE_CACHE_DIR: "./youtube_cache"
+  YOUTUBE_REFRESH_CACHE: False
+  YOUTUBE_SKIP_FRAMES: 300
+  YOUTUBE_MIN_SEQUENCE_LENGTH: 50
+  YOUTUBE_MAX_WORKERS: 16
+  MAX_SAMPLES: 10000  # Smaller for initial testing
+  FRAME_SAMPLING_RATE: 5  # 2Hz from 10Hz videos
+  
+  BATCH_SIZE: 4  # Reduced from 8 due to larger ResNet-152 model
+  VAL_SPLIT: 0.1
+  
+  # PPGeo image settings (original PPGeo uses 160x320)
+  IMG_HEIGHT: 160
+  IMG_WIDTH: 320
+
+# PPGeo specific parameters
+PPGEO:
+  STAGE: 1  # Stage 1: depth + pose training
+  FRAME_IDS: [-1, 0, 1]  # Previous, current, next frames
+  SCALES: [0, 1, 2, 3]   # Multi-scale loss
+  MIN_DEPTH: 0.1
+  MAX_DEPTH: 100.0
+  ENCODER: "resnet"  # Use ResNet encoder
+  RESNET_LAYERS: 152  # ResNet-152 (largest ResNet)
+
+# Training parameters
+TRAINING:
+  NUM_EPOCHS: 30
+  LEARNING_RATE: 1e-4
+  MAX_GRAD_NORM: 1.0
+  GRAD_ACCUM_STEPS: 8  # Increased to compensate for smaller batch size
+
+# Loss weights  
+LOSS:
+  PHOTOMETRIC_WEIGHT: 1.0
+  SMOOTHNESS_WEIGHT: 0.001
+  
+# Validation parameters
+VALIDATION:
+  VAL_FREQ: 3  # Validate every N epochs
+
+# Logging parameters
+LOGGING:
+  LOG_FREQ: 50
+
+# Output parameters
+OUTPUT:
+  CHECKPOINT_DIR: "checkpoints_ppgeo_resnet152"
+
+# W&B parameters
+WANDB:
+  PROJECT: "ppgeo-resnet"
+  USE_WANDB: True
+  RUN_NAME: "ppgeo-resnet152-stage1"

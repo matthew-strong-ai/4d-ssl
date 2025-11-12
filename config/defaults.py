@@ -13,6 +13,10 @@ _C.DATASET = CN()
 # Local dataset (legacy support)
 _C.DATASET.ROOT_DIR = ""                    # Root directory containing subfolders of images
 
+# Image dimensions
+_C.DATASET.IMG_HEIGHT = 224                 # Input image height
+_C.DATASET.IMG_WIDTH = 224                  # Input image width
+
 # S3 dataset configuration
 _C.DATASET.USE_S3 = False                   # Use S3 dataset instead of local files
 _C.DATASET.S3_BUCKET = ""                   # S3 bucket name
@@ -84,6 +88,18 @@ _C.MODEL.MAPANYTHING.NUM_LAYERS = 6         # Number of decoder layers
 _C.MODEL.MAPANYTHING.USE_TEMPORAL = True    # Enable temporal processing
 _C.MODEL.MAPANYTHING.TEMPORAL_WINDOW = 3    # Temporal window size
 
+# PPGeo specific parameters
+_C.PPGEO = CN()
+_C.PPGEO.STAGE = 1                          # PPGeo stage: 1 (depth+pose), 2 (structure+motion)
+_C.PPGEO.FRAME_IDS = [-1, 0, 1]            # Frame indices for temporal consistency
+_C.PPGEO.SCALES = [0, 1, 2, 3]             # Multi-scale supervision scales
+_C.PPGEO.MIN_DEPTH = 0.1                   # Minimum depth value
+_C.PPGEO.MAX_DEPTH = 100.0                 # Maximum depth value
+_C.PPGEO.ENCODER = "dinov3"                 # Encoder type: "dinov3", "dinov2", "vit", or "resnet"
+_C.PPGEO.RESNET_LAYERS = 18                 # Number of ResNet layers (18, 34, 50, 101, 152)
+_C.STAGE1_CHECKPOINT = ""                   # Path to Stage 1 checkpoint for Stage 2 training
+_C.DEPTHANYTHING_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/Depth-Anything-V2/metric_depth/checkpoints/depth_anything_v2_metric_vkitti_vitl.pth"  # Pre-trained DepthAnything checkpoint
+
 # MapAnything HuggingFace configuration
 _C.MODEL.MAPANYTHING.HF_MODEL_NAME = "facebook/map-anything"  # HuggingFace model name
 _C.MODEL.MAPANYTHING.CONFIG_PATH = "/home/matthew_strong/Desktop/autonomy-wild/map-anything/configs/train.yaml"       # Path to MapAnything config
@@ -150,6 +166,10 @@ _C.LOSS.DISTILLATION_LOSS_WEIGHT = 1.0        # Weight for distilled ViT loss
 _C.LOSS.DISTILLATION_POINT_FEATURES_WEIGHT = 1.0   # Weight for point_features distillation
 _C.LOSS.DISTILLATION_CAMERA_FEATURES_WEIGHT = 1.0  # Weight for camera_features distillation
 _C.LOSS.DISTILLATION_AUTONOMY_FEATURES_WEIGHT = 1.0 # Weight for autonomy_features distillation
+
+# PPGeo loss weights
+_C.LOSS.PHOTOMETRIC_WEIGHT = 1.0          # Photometric consistency loss weight
+_C.LOSS.SMOOTHNESS_WEIGHT = 0.001         # Depth smoothness loss weight
 
 # Confidence-weighted point loss parameters
 _C.LOSS.USE_CONF_WEIGHTED_POINTS = True  # Use confidence-weighted point loss instead of scale-invariant loss

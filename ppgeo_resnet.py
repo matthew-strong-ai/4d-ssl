@@ -41,21 +41,39 @@ class ResNetMultiImageInput(models.ResNet):
 def resnet_multiimage_input(num_layers, pretrained=False, num_input_images=1):
     """Constructs a ResNet model.
     Args:
-        num_layers (int): Number of resnet layers. Must be 18 or 50
+        num_layers (int): Number of resnet layers. Must be 18, 34, 50, 101, or 152
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         num_input_images (int): Number of frames stacked as input
     """
-    assert num_layers in [18, 50], "Can only run with 18 or 50 layer resnet"
-    blocks = {18: [2, 2, 2, 2], 50: [3, 4, 6, 3]}[num_layers]
-    block_type = {18: models.resnet.BasicBlock, 50: models.resnet.Bottleneck}[num_layers]
+    assert num_layers in [18, 34, 50, 101, 152], "Can only run with 18, 34, 50, 101, or 152 layer resnet"
+    blocks = {
+        18: [2, 2, 2, 2], 
+        34: [3, 4, 6, 3],
+        50: [3, 4, 6, 3], 
+        101: [3, 4, 23, 3],
+        152: [3, 8, 36, 3]
+    }[num_layers]
+    block_type = {
+        18: models.resnet.BasicBlock, 
+        34: models.resnet.BasicBlock,
+        50: models.resnet.Bottleneck, 
+        101: models.resnet.Bottleneck,
+        152: models.resnet.Bottleneck
+    }[num_layers]
     model = ResNetMultiImageInput(block_type, blocks, num_input_images=num_input_images)
 
     if pretrained:
         # Use modern torchvision approach
         if num_layers == 18:
             pretrained_model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        elif num_layers == 34:
+            pretrained_model = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1)
         elif num_layers == 50:
             pretrained_model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+        elif num_layers == 101:
+            pretrained_model = models.resnet101(weights=models.ResNet101_Weights.IMAGENET1K_V1)
+        elif num_layers == 152:
+            pretrained_model = models.resnet152(weights=models.ResNet152_Weights.IMAGENET1K_V1)
         
         # Get state dict and modify conv1 for multi-image input
         loaded = pretrained_model.state_dict()
