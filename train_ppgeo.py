@@ -71,7 +71,7 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, cfg, motio
             outputs, updated_inputs = model(batch, motion=motion)
         
         # Compute losses
-        losses = loss_fn(outputs, updated_inputs, stage=cfg.PPGEO.STAGE)
+        losses = loss_fn(outputs, updated_inputs, stage=cfg.PPGEO.STAGE, encoder_name=cfg.PPGEO.ENCODER)
         total_loss_batch = losses['total_loss']
         
         # Scale loss for gradient accumulation
@@ -156,7 +156,7 @@ def validate(model, dataloader, loss_fn, device, epoch, cfg, motionnet=None):
                 outputs, updated_inputs = model(batch, motion=motion)
             
             # Compute losses
-            losses = loss_fn(outputs, updated_inputs, stage=cfg.PPGEO.STAGE)
+            losses = loss_fn(outputs, updated_inputs, stage=cfg.PPGEO.STAGE, encoder_name=cfg.PPGEO.ENCODER)
             total_loss += losses['total_loss'].item()
     
     avg_loss = total_loss / len(dataloader)
@@ -266,12 +266,16 @@ def main():
     model = create_ppgeo_model(cfg)
 
     
-    # Load pre-trained DepthAnythingV2 weights
-    if cfg.DEPTHANYTHING_CHECKPOINT and os.path.exists(cfg.DEPTHANYTHING_CHECKPOINT):
-        model.load_pretrained_depth_weights(cfg.DEPTHANYTHING_CHECKPOINT)
+    # Load pre-trained DepthAnythingV2 weights (only for ViT encoders)
+    if cfg.PPGEO.ENCODER in ["dinov3", "dinov2", "vit"]:
+        if cfg.DEPTHANYTHING_CHECKPOINT and os.path.exists(cfg.DEPTHANYTHING_CHECKPOINT):
+            model.load_pretrained_depth_weights(cfg.DEPTHANYTHING_CHECKPOINT)
+        else:
+            print(f"⚠️ DepthAnythingV2 checkpoint not found at {cfg.DEPTHANYTHING_CHECKPOINT}")
+            print("🔄 Continuing with ViT random initialization...")
     else:
-        print(f"⚠️ DepthAnythingV2 checkpoint not found at {cfg.DEPTHANYTHING_CHECKPOINT}")
-        print("🔄 Continuing with random initialization...")
+        print(f"📦 Using ResNet-{cfg.PPGEO.RESNET_LAYERS} with ImageNet pretrained weights")
+        print("🔄 DepthAnything weights skipped (only compatible with ViT encoders)")
     
     model.to(device)
     

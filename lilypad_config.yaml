@@ -1,4 +1,4 @@
-name: matt-pi3-ff-2hz-reg
+name: matt-pi3-ff-5hz-seg-giannis
 
 workload_variant_config:
   training_fn: train_cluster.train_model

@@ -194,7 +194,6 @@ def run_grounding_dino(args, image_path: str):
 def main():
     args = parse_args()
 
-
     # Read image (for YOLO); Grounding DINO uses its own loader but needs the path
     img_bgr = load_image_bgr(args.image)
 

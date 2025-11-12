@@ -106,12 +106,10 @@ def main():
     
     # Test different configurations: (samples, batch_size, workers, pin_memory, prefetch_factor)
     configs = [
-        (1, 1, 0, False, None),      # Single sample baseline
-        (100, 1, 0, False, None),    # 100 samples, no workers
-        (100, 1, 4, True, 2),        # 100 samples, 4 workers, with pin_memory
+        # (100, 1, 4, True, 2),        # 100 samples, 4 workers, with pin_memory
         
         # Different prefetch factors
-        # (1000, 8, 4, True, 1),      # prefetch=1
+        (5000, 1, 8, True, 4),      # prefetch=1
         # (1000, 8, 4, False, 1),      # prefetch=1
 
         # (1000, 8, 4, True, 4),      # prefetch=4

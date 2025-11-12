@@ -61,7 +61,10 @@ def create_pi3_model(cfg, dinov3_local_path=None):
             ar_dropout=cfg.MODEL.AR_DROPOUT,
             encoder_name=cfg.MODEL.ENCODER_NAME.lower(),
             freeze_decoders=getattr(cfg.MODEL, 'FREEZE_DECODERS', False),
-            use_segmentation_head=cfg.MODEL.USE_SEGMENTATION_HEAD
+            use_segmentation_head=cfg.MODEL.USE_SEGMENTATION_HEAD,
+            segmentation_num_classes=cfg.MODEL.SEGMENTATION_NUM_CLASSES,
+            use_motion_head=cfg.MODEL.USE_MOTION_HEAD,
+            use_flow_head=cfg.MODEL.USE_FLOW_HEAD
         )
         
         print(f"✅ Created AutoregressivePi3 model with:")
@@ -83,6 +86,7 @@ def create_pi3_model(cfg, dinov3_local_path=None):
             dinov3_checkpoint_path=dinov3_local_path,
             use_motion_head=cfg.MODEL.USE_MOTION_HEAD,
             use_segmentation_head=cfg.MODEL.USE_SEGMENTATION_HEAD,
+            segmentation_num_classes=cfg.MODEL.SEGMENTATION_NUM_CLASSES,
             use_detection_head=cfg.MODEL.USE_DETECTION_HEAD,
             num_detection_classes=cfg.MODEL.NUM_DETECTION_CLASSES,
             detection_architecture=cfg.MODEL.DETECTION_ARCHITECTURE,

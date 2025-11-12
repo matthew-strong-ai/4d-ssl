@@ -127,7 +127,7 @@ class Pi3Losses:
             detection_loss_weight: Weight for detection loss (0.0 disables it)
         """
         sky_mask = None
-        if segformer is not None and images is not None:
+        if False and segformer is not None and images is not None:
             # combine B and N dimensions for segmentation
             B, N, C, H, W = images.shape
             images_reshaped = images.view(B * N, C, H, W)
@@ -1048,7 +1048,7 @@ class CameraPoseLosses:
                 R_gt.reshape(-1, 3, 3)
             )
 
-        alpha = 1
+        alpha = 100
 
         total_loss = alpha * trans_loss + rot_loss
         return total_loss

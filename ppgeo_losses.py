@@ -254,7 +254,6 @@ class PPGeoLoss(nn.Module):
     def forward(self, outputs: Dict[str, torch.Tensor], inputs: Dict, stage: int = 1, encoder_name: str = "dinov3") -> Dict[str, torch.Tensor]:
         """Compute PPGeo losses."""
         # Get frame images from PPGeo format
-        import ipdb; ipdb.set_trace()
         img_curr = inputs[("color", 0, 0)]  # [B, 3, H, W]
         B, C, H, W = img_curr.shape
         device = img_curr.device

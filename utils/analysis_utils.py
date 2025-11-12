@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 
-def analyze_object_dynamics(gsam2_results, pred_tracks, pred_visibility, point_maps, composite_masks=None, verbose=True, motion_threshold=0.1):
+def analyze_object_dynamics(gsam2_results, pred_tracks, pred_visibility, point_maps, composite_masks=None, verbose=True, motion_threshold=0.1, smooth_sigma=2.0):
     """
     Analyze object dynamics using GSAM2 masks, CoTracker2 tracks, and 3D point maps.
     
@@ -22,6 +22,7 @@ def analyze_object_dynamics(gsam2_results, pred_tracks, pred_visibility, point_m
         composite_masks: List of composite masks for each frame [T, H, W]
         verbose: Whether to print progress messages and object analysis results
         motion_threshold: Minimum 3D motion magnitude (in meters) to consider an object as dynamic
+        smooth_sigma: Gaussian smoothing sigma for per-object motion smoothing (default: 2.0)
     
     Returns:
         tuple: (dynamic_analysis, motion_maps, dynamic_masks)
@@ -42,7 +43,7 @@ def analyze_object_dynamics(gsam2_results, pred_tracks, pred_visibility, point_m
     
     # Compute 3D motion maps for each frame transition
     for t in range(T - 1):
-        motion_map = compute_3d_motion_field(pred_tracks, pred_visibility, point_maps, t, H, W, composite_masks)
+        motion_map = compute_3d_motion_field(pred_tracks, pred_visibility, point_maps, t, H, W, composite_masks, smooth_sigma=smooth_sigma)
         motion_maps.append(motion_map)
     
     # Get first frame masks and find which tracks belong to each object
@@ -148,10 +149,10 @@ def analyze_object_dynamics(gsam2_results, pred_tracks, pred_visibility, point_m
     return dynamic_analysis, motion_maps, dynamic_masks
 
 
-def compute_3d_motion_field(pred_tracks, pred_visibility, point_maps, t, H, W, composite_masks=None):
+def compute_3d_motion_field(pred_tracks, pred_visibility, point_maps, t, H, W, composite_masks=None, smooth_sigma=2.0):
     """
     Compute 3D motion field for frame transition t -> t+1 using CoTracker points.
-    Motion is only computed for segmented object regions.
+    Motion is only computed for segmented object regions with per-object smoothing.
     
     Args:
         pred_tracks: CoTracker2 tracks [1, T, num_points, 2]
@@ -160,12 +161,14 @@ def compute_3d_motion_field(pred_tracks, pred_visibility, point_maps, t, H, W, c
         t: Current frame index
         H, W: Height and width of the motion field
         composite_masks: List of composite masks for each frame [T, H, W]
+        smooth_sigma: Gaussian smoothing sigma for per-object smoothing (default: 2.0)
         
     Returns:
         motion_field: 3D motion field [H, W, 3] with displacement vectors (zero outside objects)
     """
     from scipy.spatial.distance import cdist
     from scipy.interpolate import griddata
+    from scipy.ndimage import gaussian_filter
     
     _, T, num_points, _ = pred_tracks.shape
     motion_field = np.zeros((H, W, 3), dtype=np.float32)
@@ -232,14 +235,46 @@ def compute_3d_motion_field(pred_tracks, pred_visibility, point_maps, t, H, W, c
         
         motion_field[:, :, dim] = interpolated_motion.reshape(H, W)
     
-    # Mask motion field to only show motion within segmented objects
+    # Apply per-object smoothing and masking
     if composite_masks is not None and len(composite_masks) > t:
-        # Get mask for current frame
-        object_mask = composite_masks[t] > 0  # Convert to boolean mask
+        # Create smoothed motion field per object
+        smoothed_motion_field = np.zeros_like(motion_field)
         
-        # Apply mask to all motion dimensions
-        for dim in range(3):
-            motion_field[:, :, dim] = motion_field[:, :, dim] * object_mask
+        # Get unique object IDs (excluding background which is 0)
+        object_ids = np.unique(composite_masks[t])
+        object_ids = object_ids[object_ids > 0]
+        
+        for obj_id in object_ids:
+            # Get mask for this specific object
+            obj_mask = (composite_masks[t] == obj_id)
+            
+            if np.sum(obj_mask) < 10:  # Skip very small objects
+                continue
+            
+            # Create dilated mask for smoothing (to avoid edge artifacts)
+            from scipy.ndimage import binary_dilation
+            dilated_mask = binary_dilation(obj_mask, iterations=int(smooth_sigma * 2))
+            
+            # Smooth motion within this object's region
+            for dim in range(3):
+                # Extract motion for this object (with dilated region)
+                obj_motion = motion_field[:, :, dim] * dilated_mask
+                
+                # Apply Gaussian smoothing
+                if smooth_sigma > 0:
+                    smoothed_obj_motion = gaussian_filter(obj_motion, sigma=smooth_sigma)
+                else:
+                    smoothed_obj_motion = obj_motion
+                
+                # Apply back only to the original object mask (not dilated)
+                smoothed_motion_field[:, :, dim] += smoothed_obj_motion * obj_mask
+        
+        motion_field = smoothed_motion_field
+    else:
+        # If no masks provided, just apply smoothing to the whole field
+        if smooth_sigma > 0:
+            for dim in range(3):
+                motion_field[:, :, dim] = gaussian_filter(motion_field[:, :, dim], sigma=smooth_sigma)
     
     return motion_field
 

@@ -25,7 +25,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pi3"))
 
 from pi3.models.pi3 import Pi3
 
-MODEL_CHECKPOINT = "checkpoints/best_model.pt"
+MODEL_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/checkpoints/best_model.pt"
 
 def load_checkpoint(checkpoint_path, cfg, device='cuda'):
     """
@@ -151,9 +151,9 @@ def run_pi3_inference(model, video_tensor, is_autoregressive=False):
     # Add batch dimension [1, T, C, H, W]
     video_batch = video_tensor.unsqueeze(0).to(device)
 
-    # if is autoregressive, give only 3 frame
+    # if is autoregressive, give only 4 frame
     if is_autoregressive:
-        video_batch = video_batch[:, :3, ...]
+        video_batch = video_batch[:, :4, ...]
     
     print(f"🔮 Running Pi3 inference on {video_tensor.shape[0]} frames...")
     
@@ -218,6 +218,65 @@ def visualize_results(predictions, original_images, save_path="pi3_results"):
         plt.savefig(os.path.join(save_path, 'confidence_predictions.png'), dpi=150)
         plt.close()
         print(f"✅ Confidence visualization saved to {save_path}/confidence_predictions.png")
+    
+    # Visualize segmentation predictions
+    if 'segmentation' in predictions:
+        print("📊 Visualizing segmentation predictions...")
+        segmentation = predictions['segmentation'].cpu().numpy()  # [T, H, W, num_classes]
+        n_classes = segmentation.shape[-1]
+        
+        # Get predicted classes
+        seg_classes = np.argmax(segmentation, axis=-1)  # [T, H, W]
+        
+        # Define class names based on number of classes
+        if n_classes == 7:
+            class_names = ['road', 'vehicle', 'person', 'traffic light', 'traffic sign', 'sky', 'bg/building']
+        elif n_classes == 6:
+            class_names = ['background', 'vehicle', 'bicycle', 'person', 'road sign', 'traffic light']
+        else:
+            class_names = [f'class_{i}' for i in range(n_classes)]
+        
+        # Create colormap for segmentation
+        cmap = plt.get_cmap('tab10' if n_classes <= 10 else 'tab20')
+        colors = [cmap(i / n_classes) for i in range(n_classes)]
+        
+        fig, axes = plt.subplots(2, n_frames, figsize=(4*n_frames, 8))
+        if n_frames == 1:
+            axes = axes.reshape(2, 1)
+        
+        for t in range(n_frames):
+            # Original image
+            axes[0, t].imshow(original_images[t])
+            axes[0, t].set_title(f'Frame {t}')
+            axes[0, t].axis('off')
+            
+            # Segmentation map
+            seg_colored = np.zeros((seg_classes.shape[1], seg_classes.shape[2], 3))
+            for c in range(n_classes):
+                mask = seg_classes[t] == c
+                seg_colored[mask] = colors[c][:3]
+            
+            axes[1, t].imshow(seg_colored)
+            axes[1, t].set_title(f'Segmentation {t}')
+            axes[1, t].axis('off')
+        
+        # Add legend for the first subplot
+        from matplotlib.patches import Patch
+        legend_elements = [Patch(facecolor=colors[i][:3], label=class_names[i]) 
+                          for i in range(n_classes)]
+        fig.legend(handles=legend_elements, loc='center right', bbox_to_anchor=(1.1, 0.5))
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_path, 'segmentation_predictions.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"✅ Segmentation visualization saved to {save_path}/segmentation_predictions.png")
+        
+        # Print segmentation statistics
+        print(f"   Segmentation shape: {segmentation.shape}")
+        print(f"   Number of classes: {n_classes}")
+        print(f"   Classes: {class_names}")
+        unique_classes = np.unique(seg_classes)
+        print(f"   Present classes in predictions: {[class_names[c] for c in unique_classes if c < len(class_names)]}")
 
 
 def create_sample_images(save_dir="sample_images"):
@@ -317,11 +376,11 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    exit()
-
     # let us run the (our) autoregressive pi3 model
+    import ipdb; ipdb.set_trace()
     model, checkpoint = load_autoregressive_pi3()
     print("🔮 Running Autoregressive Pi3 inference...")
+
     predictions = run_pi3_inference(model, video_tensor, is_autoregressive=True)
 
     # dino features
@@ -358,6 +417,19 @@ def main():
         print(f"   - Min confidence: {conf.min():.3f}")
         print(f"   - Max confidence: {conf.max():.3f}")
         print(f"   - Mean confidence: {conf.mean():.3f}")
+    
+    if 'segmentation' in predictions:
+        seg = predictions['segmentation']
+        print(f"\n🎨 Segmentation Statistics:")
+        print(f"   - Shape: {seg.shape}")
+        print(f"   - Number of classes: {seg.shape[-1]}")
+        seg_probs = torch.softmax(seg, dim=-1)
+        seg_classes = torch.argmax(seg, dim=-1)
+        unique_classes, counts = torch.unique(seg_classes, return_counts=True)
+        print(f"   - Predicted class distribution:")
+        total_pixels = seg_classes.numel()
+        for cls, cnt in zip(unique_classes.cpu().numpy(), counts.cpu().numpy()):
+            print(f"     - Class {cls}: {cnt} pixels ({100.0 * cnt / total_pixels:.1f}%)")
 
 
 if __name__ == "__main__":

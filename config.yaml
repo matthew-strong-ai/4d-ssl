@@ -19,7 +19,7 @@ DATASET:
   YOUTUBE_MIN_SEQUENCE_LENGTH: 50 # Minimum frames in video
   YOUTUBE_MAX_WORKERS: 32         # Parallel S3 workers for initial indexing
   MAX_SAMPLES: -1                # Limit dataset to 100 samples for testing (set to -1 for full dataset)
-  FRAME_SAMPLING_RATE: 5         # Sample every Nth frame (1=10Hz, 5=2Hz) from source 10Hz videos
+  FRAME_SAMPLING_RATE: 2         # Sample every Nth frame (1=10Hz, 5=2Hz) from source 10Hz videos
   
   # Old S3 dataset configuration (DISABLED - keeping for reference)  
   # USE_S3: True                    # Use S3 dataset instead of local files
@@ -63,14 +63,14 @@ MODEL:
 
   USE_MOTION_HEAD: False    # Enable optional motion prediction head for point motion estimation
   USE_FLOW_HEAD: False      # Enable optional optical flow prediction head for 2D flow estimation
-  USE_SEGMENTATION_HEAD: False    # Enable optional segmentation head for per-pixel segmentation
-  SEGMENTATION_MODEL: "gsam2"    # Segmentation model: "gsam2", "segformer", "deeplabv3"
-  SEGMENTATION_NUM_CLASSES: 6    # Number of segmentation classes (6 for GSAM2, 7 for Cityscapes)
+  USE_SEGMENTATION_HEAD: True    # Enable optional segmentation head for per-pixel segmentation
+  SEGMENTATION_MODEL: "segformer"    # Segmentation model: "gsam2", "segformer", "deeplabv3"
+  SEGMENTATION_NUM_CLASSES: 7    # Number of segmentation classes (6 for GSAM2, 7 for Cityscapes)
   FREEZE_DECODERS: True    # Freeze point, conf, and camera decoders/heads to improve token representations
   USE_FROZEN_DECODER_SUPERVISION: False  # Use frozen model's decoder features as supervision for autoregressive transformer
   
   # Distilled ViT parameters
-  USE_DISTILLED_VIT: True         # Enable distilled ViT training
+  USE_DISTILLED_VIT: False         # Enable distilled ViT training
   DISTILLED_VIT:
     EMBED_DIM: 768                 # Student embedding dimension
     DEPTH: 12                      # Number of transformer layers
@@ -144,10 +144,10 @@ OUTPUT:
   CHECKPOINT_DIR: "checkpoints"  # Directory to save checkpoints
   SAVE_NPZ: False               # Save npz files  
   SAVE_DEPTHS: True             # Save depths files (every 200 steps)
-  SAVE_SEGMENTATION: False      # Save segmentation files (every 200 steps)
+  SAVE_SEGMENTATION: True      # Save segmentation files (every 200 steps)
   
   # S3 checkpoint upload
-  UPLOAD_TO_S3: False        # Upload best checkpoints to S3
+  UPLOAD_TO_S3: True        # Upload best checkpoints to S3
   S3_BUCKET: "research-datasets"  # S3 bucket for checkpointts
   S3_PREFIX: "autonomy_checkpoints"  # S3 prefix/folder
 
@@ -155,4 +155,4 @@ OUTPUT:
 WANDB:
   PROJECT: "autonomy-wild" # Weights & Biases project name
   USE_WANDB: True               # Enable Weights & Biases logging
-  RUN_NAME: "matt-pi3-ff-2hz-reg-distill-l1"  # W&B run name (optional)
+  RUN_NAME: "matt-pi3-ff-5hz-seg-giannis"  # W&B run name (optional)

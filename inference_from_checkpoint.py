@@ -54,7 +54,7 @@ def load_checkpoint(checkpoint_path, cfg, device='cuda'):
         checkpoint = torch.load(local_temp_path, map_location=device)
     else:
         print("📂 Loading from local file...")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Get DINOv3 encoder path (required for model creation)
     dinov3_local_path = "dinov3/dinov3_vitl14_448.pth"

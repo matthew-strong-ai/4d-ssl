@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import imageio
 import wandb
+import cv2
 from PIL import Image as PILImage
 
 from losses import Pi3Losses, PointCloudLosses, NormalLosses
@@ -142,7 +143,9 @@ def save_validation_visualizations(predictions, pseudo_gt, rgb_frames, step, cfg
         # Convert to numpy
         val_predictions = {}
         for key in predictions.keys():
-            if key not in ['all_decoder_features', 'all_positional_encoding']:
+            if key not in ['all_decoder_features', 'all_positional_encoding', 'dino_features',
+                        'pi3_features', 'autonomy_features', 'conf_features', 'camera_features',
+                        'point_features']:
                 if isinstance(predictions[key], torch.Tensor):
                     val_predictions[key] = predictions[key].clone().detach().cpu().numpy().squeeze(0)  # remove batch dimension
 
@@ -241,6 +244,89 @@ def save_validation_visualizations(predictions, pseudo_gt, rgb_frames, step, cfg
             except Exception as e:
                 print(f"⚠️ Error generating validation normal maps: {e}")
 
+        # === OPTICAL FLOW VISUALIZATION ===
+        if 'flow' in val_predictions:
+            try:
+                flow_maps = val_predictions['flow']  # shape (T, H, W, 2) - (dx, dy) per pixel
+                val_flow_images_for_wandb = []
+                
+                # Also check if we have ground truth flow
+                flow_gt = None
+                if pseudo_gt is not None and 'flow' in pseudo_gt:
+                    flow_gt_tensor = pseudo_gt['flow']
+                    if isinstance(flow_gt_tensor, torch.Tensor):
+                        flow_gt = flow_gt_tensor.cpu().numpy().squeeze(0)  # Remove batch dimension
+                
+                for t in range(min(flow_maps.shape[0] - 1, 6)):  # T-1 because flow is between frames
+                    # Predicted flow
+                    flow = flow_maps[t]  # (H, W, 2) - normalized flow (divided by 200)
+                    
+                    # Denormalize flow for visualization statistics (multiply by 200 to get pixel values)
+                    flow_pixels = flow * 200.0
+                    
+                    # Compute flow magnitude and angle
+                    magnitude = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+                    angle = np.arctan2(flow[..., 1], flow[..., 0])
+                    
+                    # HSV visualization (hue=direction, saturation=1, value=magnitude)
+                    h, w = flow.shape[:2]
+                    hsv = np.zeros((h, w, 3), dtype=np.uint8)
+                    hsv[..., 0] = ((angle + np.pi) / (2 * np.pi) * 179).astype(np.uint8)  # Hue (angle)
+                    hsv[..., 1] = 255  # Saturation (always full)
+                    # For normalized flow, typical values are 0-1 (0-200 pixels movement)
+                    # Values > 1 indicate very fast motion (> 200 pixels)
+                    # Clip to [0, 2] range for visualization (0-400 pixels) then map to [0, 255]
+                    mag_norm = np.clip(magnitude / 2.0, 0, 1)  # Divide by 2 to visualize up to 400 pixels
+                    hsv[..., 2] = (mag_norm * 255).astype(np.uint8)  # Value (magnitude)
+                    
+                    # Convert to RGB
+                    flow_rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+                    
+                    # Save predicted flow
+                    filename = f"val_flow_pred_frame_{t}_to_{t+1}.png"
+                    imageio.imwrite(filename, flow_rgb)
+                    saved_files[f'flow_pred_frame_{t}'] = filename
+                    print(f"💙 Saved validation flow prediction for frames {t}→{t+1} to {filename}")
+                    
+                    # Prepare for WandB
+                    if cfg.WANDB.USE_WANDB and wandb_run:
+                        pil_image = PILImage.fromarray(flow_rgb)
+                        val_flow_images_for_wandb.append(wandb.Image(pil_image, caption=f"Val Flow Pred {t}→{t+1}"))
+                    
+                    # Save ground truth flow if available
+                    if flow_gt is not None and t < flow_gt.shape[0]:
+                        gt_flow = flow_gt[t]  # (H, W, 2)
+                        
+                        # Same visualization for GT
+                        gt_magnitude = np.sqrt(gt_flow[..., 0]**2 + gt_flow[..., 1]**2)
+                        gt_angle = np.arctan2(gt_flow[..., 1], gt_flow[..., 0])
+                        
+                        gt_hsv = np.zeros((h, w, 3), dtype=np.uint8)
+                        gt_hsv[..., 0] = ((gt_angle + np.pi) / (2 * np.pi) * 179).astype(np.uint8)
+                        gt_hsv[..., 1] = 255
+                        gt_mag_norm = np.clip(gt_magnitude / (np.percentile(gt_magnitude, 95) + 1e-8), 0, 1)
+                        gt_hsv[..., 2] = (gt_mag_norm * 255).astype(np.uint8)
+                        
+                        gt_flow_rgb = cv2.cvtColor(gt_hsv, cv2.COLOR_HSV2RGB)
+                        
+                        # Save GT flow
+                        gt_filename = f"val_flow_gt_frame_{t}_to_{t+1}.png"
+                        imageio.imwrite(gt_filename, gt_flow_rgb)
+                        saved_files[f'flow_gt_frame_{t}'] = gt_filename
+                        print(f"💙 Saved validation flow GT for frames {t}→{t+1} to {gt_filename}")
+                        
+                        if cfg.WANDB.USE_WANDB and wandb_run:
+                            gt_pil_image = PILImage.fromarray(gt_flow_rgb)
+                            val_flow_images_for_wandb.append(wandb.Image(gt_pil_image, caption=f"Val Flow GT {t}→{t+1}"))
+                
+                if wandb_run and val_flow_images_for_wandb:
+                    wandb_run.log({"val_visualizations/flow_maps": val_flow_images_for_wandb}, step=step)
+                    
+            except Exception as e:
+                print(f"⚠️ Error generating validation flow maps: {e}")
+                import traceback
+                traceback.print_exc()
+
         # === RGB FRAME LOGGING ===
         if rgb_frames is not None and wandb_run:
             rgb_images = []
@@ -284,6 +370,7 @@ def run_validation(train_model, frozen_model, val_dataloader, cfg, accelerator,
     total_point_loss = 0.0
     total_camera_loss = 0.0
     total_conf_loss = 0.0
+    total_flow_loss = 0.0
     total_frozen_decoder_loss = 0.0
     
     # Add unweighted validation losses for tracking
@@ -348,13 +435,13 @@ def run_validation(train_model, frozen_model, val_dataloader, cfg, accelerator,
             
             # Compute validation loss with optional confidence weighting
             if cfg.LOSS.USE_CONF_WEIGHTED_POINTS:
-                point_map_loss, camera_pose_loss, conf_loss, normal_loss, segmentation_loss, motion_loss, frozen_decoder_loss = Pi3Losses.pi3_loss_with_confidence_weighting(
+                point_map_loss, camera_pose_loss, conf_loss, normal_loss, segmentation_loss, motion_loss, flow_loss, frozen_decoder_loss = Pi3Losses.pi3_loss_with_confidence_weighting(
                     predictions, pseudo_gt, m_frames=cfg.MODEL.M, future_frame_weight=cfg.LOSS.FUTURE_FRAME_WEIGHT,
                     gamma=cfg.LOSS.CONF_GAMMA, alpha=cfg.LOSS.CONF_ALPHA, use_conf_weighted_points=True, gradient_weight=cfg.LOSS.GRADIENT_WEIGHT,
                     normal_loss_weight=cfg.LOSS.NORMAL_LOSS_WEIGHT
                 )
             else:
-                point_map_loss, camera_pose_loss, conf_loss, normal_loss, segmentation_loss, motion_loss, frozen_decoder_loss = Pi3Losses.pi3_loss(
+                point_map_loss, camera_pose_loss, conf_loss, normal_loss, segmentation_loss, motion_loss, flow_loss, frozen_decoder_loss = Pi3Losses.pi3_loss(
                     predictions, pseudo_gt, m_frames=cfg.MODEL.M, future_frame_weight=cfg.LOSS.FUTURE_FRAME_WEIGHT, gradient_weight=cfg.LOSS.GRADIENT_WEIGHT,
                     normal_loss_weight=cfg.LOSS.NORMAL_LOSS_WEIGHT
                 )
@@ -366,6 +453,7 @@ def run_validation(train_model, frozen_model, val_dataloader, cfg, accelerator,
                 + cfg.LOSS.NORMAL_LOSS_WEIGHT * normal_loss
                 + cfg.LOSS.SEGMENTATION_LOSS_WEIGHT * segmentation_loss
                 + cfg.LOSS.MOTION_LOSS_WEIGHT * motion_loss
+                + cfg.LOSS.FLOW_LOSS_WEIGHT * flow_loss
                 + cfg.LOSS.FROZEN_DECODER_SUPERVISION_WEIGHT * frozen_decoder_loss
             )
             
@@ -377,6 +465,7 @@ def run_validation(train_model, frozen_model, val_dataloader, cfg, accelerator,
             total_point_loss += point_map_loss.item()
             total_camera_loss += camera_pose_loss.item()
             total_conf_loss += conf_loss.item() if torch.is_tensor(conf_loss) else conf_loss
+            total_flow_loss += flow_loss.item() if torch.is_tensor(flow_loss) else flow_loss
             total_frozen_decoder_loss += frozen_decoder_loss.item() if torch.is_tensor(frozen_decoder_loss) else frozen_decoder_loss
             
             # Accumulate unweighted losses
@@ -398,6 +487,7 @@ def run_validation(train_model, frozen_model, val_dataloader, cfg, accelerator,
             'val_point_loss': total_point_loss / num_batches,
             'val_camera_loss': total_camera_loss / num_batches,
             'val_conf_loss': total_conf_loss / num_batches,
+            'val_flow_loss': total_flow_loss / num_batches,
             'val_frozen_decoder_loss': total_frozen_decoder_loss / num_batches,
             'val_unweighted_l1_points': total_unweighted_l1_points / num_batches,
             'val_unweighted_pose_loss': total_unweighted_pose_loss / num_batches,

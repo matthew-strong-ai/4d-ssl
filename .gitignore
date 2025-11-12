@@ -2,6 +2,13 @@ checkpoints/
 .gradio/
 dino/
 vision/
+joynext_test/
+wandb/
+map-anything/
+motion_overlays/
+motion_visualizations/
+gsam2_masks/
+sample_images/
 
 # My stuff
 runs/
@@ -14,6 +21,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.pyc
 
 # Distribution / packaging
 .Python
