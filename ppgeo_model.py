@@ -235,16 +235,22 @@ class PoseDecoder(nn.Module):
     
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Predict camera pose.
+        Predict camera pose - output format matching ResNet/PPGeo exactly.
         Args:
             features: Pooled features from encoder [B, feature_dim]
         Returns:
-            axis_angle, translation
+            axis_angle [B, 2, 1, 3], translation [B, 2, 1, 3] - PPGeo format
         """
         pose = self.pose_head(features)  # [B, 6]
         
-        axis_angle = pose[:, :3].unsqueeze(1)  # [B, 1, 3]
-        translation = pose[:, 3:].unsqueeze(1)  # [B, 1, 3]
+        # Format to match ResNet pose decoder output [B, 2, 1, 3]
+        # Duplicate the pose prediction for 2 frames (like ResNet does)
+        axis_angle = pose[:, :3].unsqueeze(1).unsqueeze(1)  # [B, 1, 1, 3]
+        translation = pose[:, 3:].unsqueeze(1).unsqueeze(1)  # [B, 1, 1, 3]
+        
+        # Duplicate to get [B, 2, 1, 3] format like ResNet
+        axis_angle = axis_angle.repeat(1, 2, 1, 1)  # [B, 2, 1, 3]
+        translation = translation.repeat(1, 2, 1, 1)  # [B, 2, 1, 3]
         
         return axis_angle, translation
     
@@ -602,8 +608,9 @@ class PPGeoModel(nn.Module):
         """Add camera matrices to inputs dictionary exactly like original PPGeo."""
         for scale in self.scales:
             K_scale = K.clone()
-            K_scale[:, 0] *= self.img_size[1] // (2 ** scale)  # width
-            K_scale[:, 1] *= self.img_size[0] // (2 ** scale)  # height
+            # Original PPGeo: multiply by actual dimensions at each scale
+            K_scale[:, 0] *= self.img_size[1] // (2 ** scale)  # width at scale
+            K_scale[:, 1] *= self.img_size[0] // (2 ** scale)  # height at scale
             inv_K_scale = torch.linalg.pinv(K_scale)
             inputs[("K", scale)] = K_scale
             inputs[("inv_K", scale)] = inv_K_scale
