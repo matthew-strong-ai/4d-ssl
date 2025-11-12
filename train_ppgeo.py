@@ -23,18 +23,19 @@ from ppgeo_motionnet import MotionNet
 
 
 def create_ppgeo_model(cfg):
-    """Create PPGeo model with DinOV3 encoder and DPT decoder."""
+    """Create PPGeo model with configurable encoder (ViT or ResNet)."""
     if cfg.PPGEO.STAGE == 1:
         scales = [0, 1, 2, 3]  # Multi-scale for stage 1
     else:
         scales = [0]  # Only full resolution for stage 2
         
     model = PPGeoModel(
-        encoder_name="dinov3",
+        encoder_name=getattr(cfg.PPGEO, 'ENCODER', "dinov3"),  # Default to ViT
         img_size=(cfg.DATASET.IMG_HEIGHT, cfg.DATASET.IMG_WIDTH),
         min_depth=0.1,
         max_depth=100.0,
-        scales=scales
+        scales=scales,
+        resnet_layers=getattr(cfg.PPGEO, 'RESNET_LAYERS', 18)  # Default ResNet-18
     )
     return model
 

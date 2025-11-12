@@ -17,6 +17,14 @@ sys.path.append('/home/matthew_strong/Desktop/autonomy-wild/Depth-Anything-V2/me
 from depth_anything_v2.dinov2 import DINOv2
 from depth_anything_v2.dpt import DPTHead
 
+# Import ResNet components
+from ppgeo_resnet import (
+    PPGeoResnetEncoder, 
+    PPGeoResnetDepthDecoder, 
+    PPGeoResnetPoseDecoder, 
+    PPGeoResnetPoseCNN
+)
+
 
 class PPGeoDepthAnythingEncoder(nn.Module):
     """DepthAnythingV2 DINOv2 encoder for PPGeo."""
@@ -360,7 +368,7 @@ class PoseDecoder(nn.Module):
 
 
 class PPGeoModel(nn.Module):
-    """Complete PPGeo model with DinOV3 encoder and DPT decoder."""
+    """Complete PPGeo model supporting both ViT and ResNet encoders."""
     
     def __init__(
         self, 
@@ -368,113 +376,157 @@ class PPGeoModel(nn.Module):
         img_size: Tuple[int, int] = (160, 320),
         min_depth: float = 0.1,
         max_depth: float = 100.0,
-        scales: List[int] = [0, 1, 2, 3]
+        scales: List[int] = [0, 1, 2, 3],
+        resnet_layers: int = 18
     ):
         super().__init__()
 
+        self.encoder_name = encoder_name
         self.img_size = img_size
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.scales = scales
+        self.resnet_layers = resnet_layers
         
-        # Encoder (using DepthAnythingV2 DINOv2)
-        if encoder_name == "dinov3" or encoder_name == "dinov2":
-            # Use ViT-L by default for best results
+        # Choose encoder architecture
+        if encoder_name in ["dinov3", "dinov2", "vit"]:
+            # ViT-based encoder (DepthAnythingV2 DINOv2)
             self.encoder = PPGeoDepthAnythingEncoder(model_size="vitl")
-        else:
-            raise ValueError(f"Unsupported encoder: {encoder_name}")
-        
-        # Depth decoder (using DepthAnythingV2 DPT head)
-        self.depth_decoder = PPGeoDepthAnythingDPTHead(
-            embed_dim=self.encoder.embed_dim,
-            scales=scales,
-            max_depth=max_depth
-        )
-
-        
-        # Pose encoder: separate encoder for pose estimation (takes concatenated frames)
-        # Create a modified DINOv2 encoder for 6-channel pose input
-        if encoder_name == "dinov3" or encoder_name == "dinov2":
+            self.depth_decoder = PPGeoDepthAnythingDPTHead(
+                embed_dim=self.encoder.embed_dim,
+                scales=scales,
+                max_depth=max_depth
+            )
             self.pose_encoder = PPGeoPoseEncoder(model_size="vitl")
-        else:
-            raise ValueError(f"Unsupported encoder: {encoder_name}")
+            self.pose_decoder = PoseDecoder(self.pose_encoder.embed_dim)
             
-        # Pose decoder (takes concatenated frame features)
-        self.pose_decoder = PoseDecoder(self.pose_encoder.embed_dim)
-        
-        # Camera intrinsics prediction (from pose encoder features, like original PPGeo)
-        self.fl_head = nn.Sequential(
-            nn.Linear(self.pose_encoder.embed_dim, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 2),  # fx, fy
-            nn.Softplus()
-        )
-        
-        self.offset_head = nn.Sequential(
-            nn.Linear(self.pose_encoder.embed_dim, 256), 
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 2),  # cx, cy
-            nn.Sigmoid()
-        )
+            # Camera intrinsics prediction (from pose encoder features)
+            self.fl_head = nn.Sequential(
+                nn.Linear(self.pose_encoder.embed_dim, 256),
+                nn.ReLU(inplace=True),
+                nn.Linear(256, 2),  # fx, fy
+                nn.Softplus()
+            )
+            
+            self.offset_head = nn.Sequential(
+                nn.Linear(self.pose_encoder.embed_dim, 256), 
+                nn.ReLU(inplace=True),
+                nn.Linear(256, 2),  # cx, cy
+                nn.Sigmoid()
+            )
+            
+        elif encoder_name == "resnet":
+            # ResNet-based encoder (original PPGeo style)
+            self.encoder = PPGeoResnetEncoder(num_layers=resnet_layers, pretrained=True, num_input_images=1)
+            self.depth_decoder = PPGeoResnetDepthDecoder(
+                num_ch_enc=self.encoder.num_ch_enc,
+                scales=scales,
+                num_output_channels=1,
+                use_skips=True
+            )
+            
+            # For pose: separate ResNet encoder for concatenated frames
+            self.pose_encoder = PPGeoResnetEncoder(num_layers=resnet_layers, pretrained=True, num_input_images=2)
+            self.pose_decoder = PPGeoResnetPoseDecoder(
+                num_ch_enc=self.pose_encoder.num_ch_enc,
+                num_input_features=1,
+                num_frames_to_predict_for=2
+            )
+            
+            # Camera intrinsics prediction (ResNet style)
+            self.fl_head = nn.Sequential(
+                nn.Linear(self.pose_encoder.num_ch_enc[-1], 256),
+                nn.ReLU(inplace=True),
+                nn.Linear(256, 2),  # fx, fy
+                nn.Softplus()
+            )
+            
+            self.offset_head = nn.Sequential(
+                nn.Linear(self.pose_encoder.num_ch_enc[-1], 256), 
+                nn.ReLU(inplace=True),
+                nn.Linear(256, 2),  # cx, cy
+                nn.Sigmoid()
+            )
+            
+        else:
+            raise ValueError(f"Unsupported encoder: {encoder_name}. Choose from 'dinov3', 'dinov2', 'vit', or 'resnet'")
         
         # Global average pooling for intrinsics
-        self.avg_pooling = nn.AdaptiveAvgPool1d(1)
+        self.avg_pooling = nn.AdaptiveAvgPool2d((1, 1)) if encoder_name == "resnet" else nn.AdaptiveAvgPool1d(1)
         
         # Flag to track if we've loaded pretrained weights
         self._pretrained_loaded = False
     
     def predict_poses_and_intrinsics(self, inputs: Dict):
-        """Predict poses and intrinsics like original PPGeo."""
-        # Get augmented frames for pose estimation (like original PPGeo)
+        """Predict poses and intrinsics for both ViT and ResNet."""
+        # Get augmented frames for pose estimation
         img_prev = inputs[("color_aug", -1, 0)]  # [B, 3, H, W]
         img_curr = inputs[("color_aug", 0, 0)]   # [B, 3, H, W] 
         img_next = inputs[("color_aug", 1, 0)]   # [B, 3, H, W]
         
-        # Resize pose images to be divisible by 14 (like depth images)
         B, C, H, W = img_curr.shape
-        patch_h, patch_w = H // 14, W // 14
-        new_H, new_W = patch_h * 14, patch_w * 14
-
         
-        if H != new_H or W != new_W:
-            img_prev = F.interpolate(img_prev, size=(new_H, new_W), mode='bilinear', align_corners=False)
-            img_curr = F.interpolate(img_curr, size=(new_H, new_W), mode='bilinear', align_corners=False)
-            img_next = F.interpolate(img_next, size=(new_H, new_W), mode='bilinear', align_corners=False)
+        if self.encoder_name == "resnet":
+            # ResNet approach: concatenate frame pairs
+            pose_input1 = torch.cat([img_prev, img_curr], dim=1)  # [B, 6, H, W] prev->curr
+            pose_input2 = torch.cat([img_curr, img_next], dim=1)  # [B, 6, H, W] curr->next
+            
+            # Forward through ResNet pose encoder with normalization
+            pose_features1 = self.pose_encoder(pose_input1, normalize=True)
+            pose_features2 = self.pose_encoder(pose_input2, normalize=True)
+            
+            # Use ResNet pose decoder
+            axis_angle1, translation1 = self.pose_decoder([pose_features1])
+            axis_angle2, translation2 = self.pose_decoder([pose_features2])
+            
+            # Predict intrinsics from last ResNet features with global average pooling
+            pose_feat1 = torch.flatten(self.avg_pooling(pose_features1[-1]), 1)  # [B, 512]
+            pose_feat2 = torch.flatten(self.avg_pooling(pose_features2[-1]), 1)  # [B, 512]
+            
+        else:  # ViT approach
+            # Resize pose images to be divisible by 14 for ViT
+            patch_h, patch_w = H // 14, W // 14
+            new_H, new_W = patch_h * 14, patch_w * 14
+            
+            if H != new_H or W != new_W:
+                img_prev = F.interpolate(img_prev, size=(new_H, new_W), mode='bilinear', align_corners=False)
+                img_curr = F.interpolate(img_curr, size=(new_H, new_W), mode='bilinear', align_corners=False)
+                img_next = F.interpolate(img_next, size=(new_H, new_W), mode='bilinear', align_corners=False)
+                H, W = new_H, new_W
+            
+            # Concatenate frame pairs
+            pose_input1 = torch.cat([img_prev, img_curr], dim=1)  # [B, 6, H, W]
+            pose_input2 = torch.cat([img_curr, img_next], dim=1)  # [B, 6, H, W]
+            
+            # Forward through ViT pose encoder
+            pose_features1 = self.pose_encoder(pose_input1)
+            pose_features2 = self.pose_encoder(pose_input2)
+            
+            # Use highest resolution features and global average pool
+            pose_feat1 = pose_features1[-1][0].mean(dim=1)  # [B, embed_dim]
+            pose_feat2 = pose_features2[-1][0].mean(dim=1)  # [B, embed_dim]
+            
+            # Predict poses
+            axis_angle1, translation1 = self.pose_decoder(pose_feat1)
+            axis_angle2, translation2 = self.pose_decoder(pose_feat2)
         
-        # Concatenate frame pairs (like original PPGeo)
-        pose_input1 = torch.cat([img_prev, img_curr], dim=1)  # [B, 6, H, W] prev->curr
-        pose_input2 = torch.cat([img_curr, img_next], dim=1)  # [B, 6, H, W] curr->next
-        
-
-        # Forward through pose encoder
-        pose_features1 = self.pose_encoder(pose_input1)  # Features for prev->curr
-        pose_features2 = self.pose_encoder(pose_input2)  # Features for curr->next
-        
-        # Use highest resolution features and global average pool
-        pose_feat1 = pose_features1[-1][0].mean(dim=1)  # [B, embed_dim]
-        pose_feat2 = pose_features2[-1][0].mean(dim=1)  # [B, embed_dim]
-        
-        # Predict poses
-        axis_angle1, translation1 = self.pose_decoder(pose_feat1)
-        axis_angle2, translation2 = self.pose_decoder(pose_feat2)
-        
-        # Predict intrinsics from both pose features (average like original PPGeo)
+        # Predict intrinsics from pose features (average like original PPGeo)
         fl1 = self.fl_head(pose_feat1)  # [B, 2] - fx, fy
         offset1 = self.offset_head(pose_feat1)  # [B, 2] - cx, cy
         
         fl2 = self.fl_head(pose_feat2)  # [B, 2] - fx, fy  
         offset2 = self.offset_head(pose_feat2)  # [B, 2] - cx, cy
         
-        # Compute K matrices separately and average them (like original PPGeo)
-        K1 = self.compute_K_matrix(fl1, offset1, new_H, new_W)
-        K2 = self.compute_K_matrix(fl2, offset2, new_H, new_W)
+        # Compute K matrices separately and average them
+        K1 = self.compute_K_matrix(fl1, offset1, H, W)
+        K2 = self.compute_K_matrix(fl2, offset2, H, W)
         K = (K1 + K2) / 2
         
         return axis_angle1, translation1, axis_angle2, translation2, K
     
     def forward(self, inputs: Dict, motion: tuple = None) -> Dict[str, torch.Tensor]:
         """
-        Forward pass for PPGeo training.
+        Forward pass for PPGeo training supporting both ViT and ResNet.
         Args:
             inputs: Dictionary with PPGeo-style tuple keys like ("color_aug", frame_id, scale)
             motion: Optional tuple (axis_angle1, translation1, axis_angle2, translation2) for Stage 2
@@ -486,21 +538,23 @@ class PPGeoModel(nn.Module):
         img_curr = inputs[("color_aug", 0, 0)]  # [B, 3, H, W] 
         B, C, H, W = img_curr.shape
         
-        # Calculate patch dimensions for DepthAnything
-        patch_h, patch_w = H // 14, W // 14  # DepthAnything uses 14x14 patches
-
-        # lets resize the image to be divisible by 14
-        new_H = patch_h * 14
-        new_W = patch_w * 14
-        img_curr = F.interpolate(img_curr, size=(new_H, new_W), mode='bilinear', align_corners=False)
-        H, W = new_H, new_W
-
-        
-        # Extract features for current frame (for depth)
-        curr_features = self.encoder(img_curr)  # List of (patch_features, cls_token) tuples
-        
-        # Predict depth for current frame
-        depth_outputs = self.depth_decoder(curr_features, patch_h, patch_w)
+        if self.encoder_name == "resnet":
+            # ResNet approach: use image as-is with normalization
+            curr_features = self.encoder(img_curr, normalize=True)
+            depth_outputs = self.depth_decoder(curr_features)
+            
+        else:  # ViT approach
+            # Calculate patch dimensions for ViT (requires divisible by 14)
+            patch_h, patch_w = H // 14, W // 14
+            new_H, new_W = patch_h * 14, patch_w * 14
+            
+            if H != new_H or W != new_W:
+                img_curr = F.interpolate(img_curr, size=(new_H, new_W), mode='bilinear', align_corners=False)
+                H, W = new_H, new_W
+            
+            # Extract ViT features for current frame
+            curr_features = self.encoder(img_curr)  # List of (patch_features, cls_token) tuples
+            depth_outputs = self.depth_decoder(curr_features, patch_h, patch_w)
 
         # Predict poses and intrinsics (Stage 1) or use provided motion (Stage 2)
         if motion is not None:
@@ -510,11 +564,10 @@ class PPGeoModel(nn.Module):
             # Still need to predict intrinsics for Stage 2
             _, _, _, _, K = self.predict_poses_and_intrinsics(inputs)
         else:
-            # Stage 1: Predict poses and intrinsics from model (like original PPGeo)
+            # Stage 1: Predict poses and intrinsics from model
             axis_angle1, translation1, axis_angle2, translation2, K = self.predict_poses_and_intrinsics(inputs)
         
-        
-        # Add K matrix to inputs (like original PPGeo)
+        # Add K matrix to inputs
         inputs = self.add_K_to_inputs(K, inputs)
         
         # Build output dictionary

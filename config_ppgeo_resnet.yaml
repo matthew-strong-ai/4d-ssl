@@ -1,5 +1,5 @@
-# PPGeo Training Configuration
-# Self-supervised depth and pose learning with DinOV3 + DPT
+# PPGeo ResNet Training Configuration
+# Self-supervised depth and pose learning with ResNet encoder
 
 # Dataset parameters (use existing YouTube S3 dataset)
 DATASET:
@@ -17,14 +17,10 @@ DATASET:
   BATCH_SIZE: 8
   VAL_SPLIT: 0.1
   
-  # PPGeo image settings
+  # PPGeo image settings (original PPGeo uses 160x320)
   IMG_HEIGHT: 160
   IMG_WIDTH: 320
 
-# Model parameters
-MODEL:
-  ENCODER_NAME: "dinov3"  # Use DinOV3 ViT encoder
-  
 # PPGeo specific parameters
 PPGEO:
   STAGE: 1  # Stage 1: depth + pose training
@@ -32,8 +28,8 @@ PPGEO:
   SCALES: [0, 1, 2, 3]   # Multi-scale loss
   MIN_DEPTH: 0.1
   MAX_DEPTH: 100.0
-  ENCODER: "dinov3"  # Choose: "dinov3", "dinov2", "vit", or "resnet"
-  RESNET_LAYERS: 18  # If using ResNet, choose layers: 18, 34, 50, 101, 152
+  ENCODER: "resnet"  # Use ResNet encoder
+  RESNET_LAYERS: 18  # ResNet-18 (original PPGeo default)
 
 # Training parameters
 TRAINING:
@@ -57,13 +53,10 @@ LOGGING:
 
 # Output parameters
 OUTPUT:
-  CHECKPOINT_DIR: "checkpoints_ppgeo"
-
-# Pre-trained checkpoint
-DEPTHANYTHING_CHECKPOINT: "/home/matthew_strong/Desktop/autonomy-wild/Depth-Anything-V2/metric_depth/checkpoints/depth_anything_v2_metric_vkitti_vitl.pth"
+  CHECKPOINT_DIR: "checkpoints_ppgeo_resnet"
 
 # W&B parameters
 WANDB:
-  PROJECT: "ppgeo-dinov3"
+  PROJECT: "ppgeo-resnet"
   USE_WANDB: True
-  RUN_NAME: "ppgeo-dinov3-dpt-stage1"
+  RUN_NAME: "ppgeo-resnet18-stage1"
