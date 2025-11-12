@@ -430,7 +430,7 @@ class PPGeoModel(nn.Module):
             self.pose_decoder = PPGeoResnetPoseDecoder(
                 num_ch_enc=self.pose_encoder.num_ch_enc,
                 num_input_features=1,
-                num_frames_to_predict_for=2
+                num_frames_to_predict_for=2  # Explicitly set to 2 for PPGeo
             )
             
             # Camera intrinsics prediction (ResNet style)
@@ -475,9 +475,12 @@ class PPGeoModel(nn.Module):
             pose_features1 = self.pose_encoder(pose_input1, normalize=True)
             pose_features2 = self.pose_encoder(pose_input2, normalize=True)
             
-            # Use ResNet pose decoder
+            # Use ResNet pose decoder (following original PPGeo exactly)
             axis_angle1, translation1 = self.pose_decoder([pose_features1])
             axis_angle2, translation2 = self.pose_decoder([pose_features2])
+            
+            # Original PPGeo accesses with [:, 0] to get [B, 1, 3] from [B, num_frames, 1, 3]
+            # But we need to store [B, num_frames, 1, 3] format for losses
             
             # Predict intrinsics from last ResNet features with global average pooling
             pose_feat1 = torch.flatten(self.avg_pooling(pose_features1[-1]), 1)  # [B, 512]

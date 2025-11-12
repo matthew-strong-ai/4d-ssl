@@ -251,9 +251,10 @@ class PPGeoLoss(nn.Module):
         
         return K
     
-    def forward(self, outputs: Dict[str, torch.Tensor], inputs: Dict, stage: int = 1) -> Dict[str, torch.Tensor]:
+    def forward(self, outputs: Dict[str, torch.Tensor], inputs: Dict, stage: int = 1, encoder_name: str = "dinov3") -> Dict[str, torch.Tensor]:
         """Compute PPGeo losses."""
         # Get frame images from PPGeo format
+        import ipdb; ipdb.set_trace()
         img_curr = inputs[("color", 0, 0)]  # [B, 3, H, W]
         B, C, H, W = img_curr.shape
         device = img_curr.device
@@ -267,11 +268,11 @@ class PPGeoLoss(nn.Module):
         K = inputs[("K", 0)]
         inv_K = inputs[("inv_K", 0)]
         
-        # Build transformation matrices
+        # Build transformation matrices (following original PPGeo)
         T_prev = transformation_from_parameters(
-            outputs[("axisangle", 0, -1)], outputs[("translation", 0, -1)], invert=True)
+            outputs[("axisangle", 0, -1)][:, 0], outputs[("translation", 0, -1)][:, 0], invert=True)
         T_next = transformation_from_parameters(
-            outputs[("axisangle", 0, 1)], outputs[("translation", 0, 1)], invert=False)
+            outputs[("axisangle", 0, 1)][:, 0], outputs[("translation", 0, 1)][:, 0], invert=False)
         
         total_loss = 0
         losses = {}
@@ -284,8 +285,24 @@ class PPGeoLoss(nn.Module):
             loss = 0
             reprojection_losses = []
             
-            # Get depth from outputs
-            depth = outputs[("disp", scale)]
+            # Get disparity from outputs
+            if encoder_name == "resnet":
+                # ResNet outputs sigmoid disparity - use directly
+                disp = outputs[("disp", scale)]
+                # Convert to depth for geometry
+                min_depth, max_depth = 0.1, 100.0
+                _, depth = disp_to_depth(disp, min_depth, max_depth)
+            else:
+                # ViT outputs depth - convert to disparity for consistency
+                depth = outputs[("disp", scale)]
+                depth = torch.clamp(depth, 0.1, 100.0)
+                # Convert depth back to disparity for smoothness loss
+                min_depth, max_depth = 0.1, 100.0
+                min_disp = 1 / max_depth
+                max_disp = 1 / min_depth
+                disp = (1 / depth - min_disp) / (max_disp - min_disp)
+                disp = torch.clamp(disp, 0, 1)
+            
             # Clamp depth values to reasonable range
             depth = torch.clamp(depth, 0.1, 100.0)
             
@@ -351,12 +368,12 @@ class PPGeoLoss(nn.Module):
             
             loss += to_optimise.mean()
             
-            # Smoothness loss
-            mean_depth = depth.mean(2, True).mean(3, True)
-            norm_depth = depth / (mean_depth + 1e-7)
-            # make H W same for norm_depth and img_curr_scale. Make the shapes match
-            norm_depth = F.interpolate(norm_depth, size=img_curr_scale.shape[2:], mode='bilinear', align_corners=False)
-            smooth_loss = get_smooth_loss(norm_depth, img_curr_scale)
+            # Smoothness loss - use disparity for better gradients (following original PPGeo)
+            mean_disp = disp.mean(2, True).mean(3, True)
+            norm_disp = disp / (mean_disp + 1e-7)
+            # Make H W same for norm_disp and img_curr_scale
+            norm_disp = F.interpolate(norm_disp, size=img_curr_scale.shape[2:], mode='bilinear', align_corners=False)
+            smooth_loss = get_smooth_loss(norm_disp, img_curr_scale)
             
             loss += 1e-3 * smooth_loss / (2 ** scale)
             

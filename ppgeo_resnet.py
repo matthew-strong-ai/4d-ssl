@@ -242,42 +242,47 @@ class PPGeoResnetDepthDecoder(nn.Module):
 
 
 class PPGeoResnetPoseDecoder(nn.Module):
-    """ResNet pose decoder following original PPGeo implementation."""
+    """ResNet pose decoder following original PPGeo implementation exactly."""
     
-    def __init__(self, num_ch_enc, num_input_features=1, num_frames_to_predict_for=2):
+    def __init__(self, num_ch_enc, num_input_features=1, num_frames_to_predict_for=None):
         super(PPGeoResnetPoseDecoder, self).__init__()
 
         self.num_ch_enc = num_ch_enc
         self.num_input_features = num_input_features
+        
+        # Following original PPGeo logic
+        if num_frames_to_predict_for is None:
+            num_frames_to_predict_for = num_input_features - 1
         self.num_frames_to_predict_for = num_frames_to_predict_for
 
-        # Create modules properly
-        self.squeeze = nn.Conv2d(self.num_ch_enc[-1], 256, 1)
-        self.pose_conv_0 = nn.Conv2d(num_input_features * 256, 256, 3, 1, 1)
-        self.pose_conv_1 = nn.Conv2d(256, 256, 3, 1, 1)
-        self.pose_conv_2 = nn.Conv2d(256, 6 * num_frames_to_predict_for, 1)
+        # Create modules exactly like original
+        self.convs = OrderedDict()
+        self.convs[("squeeze")] = nn.Conv2d(self.num_ch_enc[-1], 256, 1)
+        self.convs[("pose", 0)] = nn.Conv2d(num_input_features * 256, 256, 3, 1, 1)
+        self.convs[("pose", 1)] = nn.Conv2d(256, 256, 3, 1, 1)
+        self.convs[("pose", 2)] = nn.Conv2d(256, 6 * num_frames_to_predict_for, 1)
 
         self.relu = nn.ReLU()
+        self.net = nn.ModuleList(list(self.convs.values()))
 
     def forward(self, input_features):
         """
-        Predict camera pose from ResNet features.
+        Predict camera pose from ResNet features exactly like original PPGeo.
         Args:
-            input_features: List of features from ResNet encoder (only uses last level)
+            input_features: List of features from ResNet encoder
         Returns:
-            axisangle, translation
+            axisangle [B, num_frames, 1, 3], translation [B, num_frames, 1, 3]
         """
         last_features = [f[-1] for f in input_features]
 
-        cat_features = [self.relu(self.squeeze(f)) for f in last_features]
+        cat_features = [self.relu(self.convs["squeeze"](f)) for f in last_features]
         cat_features = torch.cat(cat_features, 1)
 
         out = cat_features
-        out = self.pose_conv_0(out)
-        out = self.relu(out)
-        out = self.pose_conv_1(out)
-        out = self.relu(out)
-        out = self.pose_conv_2(out)
+        for i in range(3):
+            out = self.convs[("pose", i)](out)
+            if i != 2:
+                out = self.relu(out)
 
         out = out.mean(3).mean(2)
         out = 0.01 * out.view(-1, self.num_frames_to_predict_for, 1, 6)
