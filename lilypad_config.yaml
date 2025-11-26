@@ -1,4 +1,4 @@
-name: matt-pi3-ff-5hz-seg-giannis
+name: matt-pi3-final-stage1
 
 workload_variant_config:
   training_fn: train_cluster.train_model
@@ -13,7 +13,7 @@ workload_variant_config:
 
 cluster_resources:
   gpu_machine_type: a100.8
-  num_gpus: 16  # Direct GPU count
+  num_gpus: 32  # Direct GPU count
   customer_resource: "research"  # Required field
 
 runtime_environment:

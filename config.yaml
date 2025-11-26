@@ -21,6 +21,11 @@ DATASET:
   MAX_SAMPLES: -1                # Limit dataset to 100 samples for testing (set to -1 for full dataset)
   FRAME_SAMPLING_RATE: 2         # Sample every Nth frame (1=10Hz, 5=2Hz) from source 10Hz videos
   
+  # Multi-rate training configuration
+  USE_MULTI_RATE_TRAINING: False   # Enable training with multiple frame rates
+  MULTI_RATE_FRAME_RATES: [1, 2, 5]  # Train on 10Hz, 5Hz, and 2Hz data
+  MULTI_RATE_WEIGHTS: null        # Sampling weights for each rate (null = uniform)
+  
   # Old S3 dataset configuration (DISABLED - keeping for reference)  
   # USE_S3: True                    # Use S3 dataset instead of local files
   # S3_BUCKET: "research-datasets"  # S3 bucket name
@@ -36,7 +41,7 @@ DATASET:
   VAL_SPLIT: 0.05                # Fraction of data to use for validation (smaller for huge dataset)
   
 
-# Model parameters  
+# Model parameters 
 MODEL:
   M: 3                         # Number of input frames
   N: 3                           # Number of target frames
@@ -63,7 +68,7 @@ MODEL:
 
   USE_MOTION_HEAD: False    # Enable optional motion prediction head for point motion estimation
   USE_FLOW_HEAD: False      # Enable optional optical flow prediction head for 2D flow estimation
-  USE_SEGMENTATION_HEAD: True    # Enable optional segmentation head for per-pixel segmentation
+  USE_SEGMENTATION_HEAD: False    # Enable optional segmentation head for per-pixel segmentation
   SEGMENTATION_MODEL: "segformer"    # Segmentation model: "gsam2", "segformer", "deeplabv3"
   SEGMENTATION_NUM_CLASSES: 7    # Number of segmentation classes (6 for GSAM2, 7 for Cityscapes)
   FREEZE_DECODERS: True    # Freeze point, conf, and camera decoders/heads to improve token representations
@@ -75,14 +80,14 @@ MODEL:
     EMBED_DIM: 768                 # Student embedding dimension
     DEPTH: 12                      # Number of transformer layers
     NUM_HEADS: 12                  # Number of attention heads
-    DISTILL_TOKENS: ['point_features', 'camera_features', 'autonomy_features']  # Features to distill
+    DISTILL_TOKENS: ['autonomy_features']  # Features to distill
     TEMPERATURE: 4.0               # Distillation temperature
     USE_COSINE_SIMILARITY: True    # Use cosine similarity loss
 
 
 POINT_MOTION: 
   TRAIN_MOTION: False    # Enable motion ground truth computation using CoTracker3
-  MOTION_THRESHOLD: 0.1  # Threshold for converting motion magnitude to binary mask (meters)
+  MOTION_THRESHOLD: 0.2  # Threshold for converting motion magnitude to binary mask (meters)
 
 # Motion Detection parameters (using optical flow)
 MOTION_DETECTION:
@@ -119,7 +124,7 @@ LOSS:
   PC_LOSS_WEIGHT: 1.0           # Point cloud loss weight
   POSE_LOSS_WEIGHT: 0.1         # Camera pose loss weight
   CONF_LOSS_WEIGHT: 0.05         # Confidence loss weight
-  SEGMENTATION_LOSS_WEIGHT: 1.0   # Segmentation loss weight (GroundingDINO supervision)
+  SEGMENTATION_LOSS_WEIGHT: 1.0   # Segmentation loss weight (GroundingDINO supervision), usually 1.0
   NORMAL_LOSS_WEIGHT: 10.0       # Normal loss weight (0.0 disables it)
   DETECTION_LOSS_WEIGHT: 0.0     # Detection loss weight (GroundingDINO supervision, 0.0 disables it)
   FUTURE_FRAME_WEIGHT:   10.0      # Weight multiplier for future frame supervision (>1.0 emphasizes future frames, 0.0 = current frames only)
@@ -155,4 +160,4 @@ OUTPUT:
 WANDB:
   PROJECT: "autonomy-wild" # Weights & Biases project name
   USE_WANDB: True               # Enable Weights & Biases logging
-  RUN_NAME: "matt-pi3-ff-5hz-seg-giannis"  # W&B run name (optional)
+  RUN_NAME: "matt-pi3-final-stage1"  # W&B run name (optional)

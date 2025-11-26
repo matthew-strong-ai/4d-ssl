@@ -103,15 +103,15 @@ class YouTubeS3Dataset(Dataset):
         self.frame_sampling_rate = frame_sampling_rate
         
         # Initialize background caching system
-        self.enable_background_cache = True
+        self.enable_background_cache = False  # Disabled to prevent memory growth
         self.ram_cache = {}  # {frame_key: image_bytes}
         self.cache_access_count = defaultdict(int)
         self.cache_lock = threading.Lock()
-        self.max_cache_size_mb = 102400  # 100GB RAM cache
+        self.max_cache_size_mb = 10240  # 10GB RAM cache (reduced from 100GB)
         self.current_cache_size = 0
         
         # Background caching
-        self.prefetch_queue = Queue(maxsize=1000000)
+        self.prefetch_queue = Queue(maxsize=10000)  # Reduced from 1M to 10K
         self.cache_stop_event = threading.Event()
         self.background_cache_thread = None
         
@@ -152,23 +152,26 @@ class YouTubeS3Dataset(Dataset):
         self.ram_cache = {}  # {frame_key: image_bytes}
         self.cache_access_count = defaultdict(int)
         self.cache_lock = threading.Lock()
-        self.max_cache_size_mb = 204800  # 200GB RAM cache
+        self.max_cache_size_mb = 10240  # 10GB RAM cache (reduced from 200GB)
         self.current_cache_size = 0
         
         # Background prefetching
-        self.prefetch_queue = Queue(maxsize=100000)
+        self.prefetch_queue = Queue(maxsize=10000)  # Reduced from 100K to 10K
         self.cache_stop_event = threading.Event()
         
         # Build or load the dataset index
         self.sequences = self._build_dataset_index(refresh_cache)
         
-        # Start background caching thread
-        self.background_cache_thread = threading.Thread(
-            target=self._background_cache_worker, 
-            daemon=True,
-            name="BackgroundCacheWorker"
-        )
-        self.background_cache_thread.start()
+        # Start background caching thread only if enabled
+        if self.enable_background_cache:
+            self.background_cache_thread = threading.Thread(
+                target=self._background_cache_worker, 
+                daemon=True,
+                name="BackgroundCacheWorker"
+            )
+            self.background_cache_thread.start()
+        else:
+            self.background_cache_thread = None
         
         if self.verbose:
             print(f"\n📊 YouTube S3 Dataset Statistics:")
@@ -627,6 +630,8 @@ class YouTubeS3Dataset(Dataset):
     
     def _queue_for_prefetch(self, frame_keys: List[str]):
         """Queue frames for background prefetching"""
+        if not self.enable_background_cache:
+            return  # Skip prefetching if disabled
         for frame_key in frame_keys:
             try:
                 # Only queue if not already in cache

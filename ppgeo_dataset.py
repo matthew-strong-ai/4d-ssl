@@ -5,11 +5,26 @@ PPGeo dataset for frame triplets (prev, curr, next) from YouTube S3 data.
 import os
 import torch
 from torch.utils.data import Dataset
-from PIL import Image
+from PIL import Image, ImageFilter
 import torchvision.transforms as T
 import numpy as np
 from utils.youtube_s3_dataset import YouTubeS3Dataset
 from typing import Tuple, Dict
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import random
+
+
+class GaussianBlur(object):
+    """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
+
+    def __init__(self, sigma=[.1, 2.]):
+        self.sigma = sigma
+
+    def __call__(self, x):
+        sigma = random.uniform(self.sigma[0], self.sigma[1])
+        x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
+        return x
 
 
 class PPGeoDataset(Dataset):
@@ -147,13 +162,15 @@ class PPGeoDataset(Dataset):
             img_tensor = images[i]  # [3, H, W]
             img_pil = T.ToPILImage()(img_tensor)
             
-            # Crop to remove car hood (like original PPGeo)
+            # Just resize to target size without cropping
+            img_pil = img_pil.resize((320, 160), Image.BILINEAR)
+                
             pil_images[frame_id] = img_pil
             
             # Store base image at scale -1 (will be processed later)
             inputs[("color", frame_id, -1)] = img_pil
         
-        # Setup color augmentation
+        # Setup color augmentation (matching original PPGeo exactly)
         if self.is_train:
             color_aug = T.Compose([
                 T.RandomApply([
@@ -161,6 +178,7 @@ class PPGeoDataset(Dataset):
                                 saturation=(0.8, 1.2), hue=(-0.1, 0.1))
                 ], p=0.8),
                 T.RandomGrayscale(p=0.2),
+                T.RandomApply([GaussianBlur([.1, 2.])], p=0.5)
             ])
         else:
             color_aug = lambda x: x

@@ -1,111 +1,91 @@
 """
 PPGeo MotionNet for Stage 2 training.
-Visual encoder for motion estimation.
+Follows exact PPGeo implementation with ResNet34 encoder.
 """
 
 import torch
 import torch.nn as nn
-import sys
-import os
 from typing import Tuple, Dict
 
-# Add DepthAnythingV2 to path
-sys.path.append('/home/matthew_strong/Desktop/autonomy-wild/Depth-Anything-V2/metric_depth')
-
-from depth_anything_v2.dinov2 import DINOv2
+# Import PPGeo ResNet encoder
+from ppgeo_resnet import PPGeoResnetEncoder
 
 
 class MotionNet(nn.Module):
     """
     MotionNet for PPGeo Stage 2 training.
-    Uses DINOv2 encoder for visual motion estimation.
+    Uses ResNet34 encoder exactly like original PPGeo implementation.
     """
     
-    def __init__(self, model_size: str = "vitl"):
+    def __init__(self, resnet_layers: int = 34):
         super().__init__()
         
-        # Use DINOv2 encoder (similar to Stage 1 but for motion)
-        self.visual_encoder = DINOv2(model_name=model_size)
-        
-        # Motion decoder - predicts pose from visual features
-        self.motion_decoder = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),  # Global average pool over patches
-            nn.Flatten(),
-            nn.Linear(self.visual_encoder.embed_dim, 512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 6)  # 3 for rotation (axis-angle), 3 for translation
+        # Use ResNet encoder exactly like original PPGeo
+        self.visual_encoder = PPGeoResnetEncoder(
+            num_layers=resnet_layers, 
+            pretrained=True, 
+            num_input_images=1  # Single image input
         )
         
-        # Layer indices for intermediate features
-        self.intermediate_layer_idx = {
-            'vits': [2, 5, 8, 11],
-            'vitb': [2, 5, 8, 11], 
-            'vitl': [4, 11, 17, 23], 
-            'vitg': [9, 19, 29, 39]
-        }
-        self.model_size = model_size
-    
-    def extract_motion_features(self, image: torch.Tensor) -> torch.Tensor:
-        """
-        Extract motion features from an image.
-        Args:
-            image: Input image [B, 3, H, W]
-        Returns:
-            features: Motion features [B, embed_dim]
-        """
-        # Get intermediate features and use the last layer
-        features = self.visual_encoder.get_intermediate_layers(
-            image, 
-            self.intermediate_layer_idx[self.model_size], 
-            return_class_token=True
-        )
+        # Motion decoder follows original PoseDecoder architecture
+        from collections import OrderedDict
         
-        # Use the highest resolution patch features (last layer)
-        patch_features = features[-1][0]  # [B, N_patches, embed_dim]
+        self.convs = OrderedDict()
+        self.convs[("squeeze")] = nn.Conv2d(self.visual_encoder.num_ch_enc[-1], 256, 1)
+        self.convs[("pose", 0)] = nn.Conv2d(1 * 256, 256, 3, 1, 1)  # num_input_features=1
+        self.convs[("pose", 1)] = nn.Conv2d(256, 256, 3, 1, 1)
+        self.convs[("pose", 2)] = nn.Conv2d(256, 6 * 2, 1)  # 6 params * 2 frames
         
-        # Global average pool across patches
-        motion_features = patch_features.mean(dim=1)  # [B, embed_dim]
-        
-        return motion_features
-    
-    def predict_pose(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Predict pose from motion features.
-        Args:
-            features: Motion features [B, embed_dim]
-        Returns:
-            axisangle, translation
-        """
-        pose = self.motion_decoder(features.unsqueeze(-1))  # Add sequence dim for AdaptiveAvgPool1d
-        
-        axis_angle = pose[:, :3].unsqueeze(1)  # [B, 1, 3]
-        translation = pose[:, 3:].unsqueeze(1)  # [B, 1, 3]
-        
-        return axis_angle, translation
+        self.relu = nn.ReLU()
+        self.net = nn.ModuleList(list(self.convs.values()))
     
     def forward(self, inputs: Dict) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Forward pass for motion estimation.
+        Forward pass for motion estimation - follows exact PPGeo implementation.
         Args:
             inputs: Dictionary with PPGeo-style tuple keys
         Returns:
             axisangle1, translation1, axisangle2, translation2
         """
-        # Get frames from PPGeo format
-        img_prev = inputs[("color_aug", -1, 0)]  # [B, 3, H, W]
-        img_curr = inputs[("color_aug", 0, 0)]   # [B, 3, H, W]
+        # Get frames from PPGeo format - exactly like original
+        motion_inputs1 = inputs[("color_aug", -1, 0)]  # Previous frame
+        motion_inputs2 = inputs[("color_aug", 0, 0)]   # Current frame
         
-        # Extract motion features for both frames
-        features_prev = self.extract_motion_features(img_prev)
-        features_curr = self.extract_motion_features(img_curr)
+        # Encode both frames separately (like original PPGeo)
+        enc1 = self.visual_encoder(motion_inputs1, normalize=True)
+        enc2 = self.visual_encoder(motion_inputs2, normalize=True)
         
-        # Predict poses from individual frame features
-        # This differs from the original PPGeo which used concatenated features
-        # but is more robust for our DINOv2-based approach
-        axisangle1, translation1 = self.predict_pose(features_prev)
-        axisangle2, translation2 = self.predict_pose(features_curr)
+        # Apply pose decoder to each encoded frame
+        axisangle1, translation1 = self._decode_pose([enc1])
+        axisangle2, translation2 = self._decode_pose([enc2])
         
         return axisangle1, translation1, axisangle2, translation2
+    
+    def _decode_pose(self, input_features):
+        """
+        Decode pose from features - follows exact PPGeo PoseDecoder implementation.
+        """
+        # Extract last feature from each input
+        last_features = [f[-1] for f in input_features]
+        
+        # Apply squeeze convolution and ReLU
+        cat_features = [self.relu(self.convs["squeeze"](f)) for f in last_features]
+        cat_features = torch.cat(cat_features, 1)
+        
+        # Apply pose convolutions
+        out = cat_features
+        for i in range(3):
+            out = self.convs[("pose", i)](out)
+            if i != 2:
+                out = self.relu(out)
+        
+        # Global average pooling
+        out = out.mean(3).mean(2)
+        
+        # Reshape and scale by 0.01 (exactly like original)
+        out = 0.01 * out.view(-1, 2, 1, 6)  # 2 frames to predict for
+        
+        axisangle = out[..., :3]
+        translation = out[..., 3:]
+        
+        return axisangle, translation

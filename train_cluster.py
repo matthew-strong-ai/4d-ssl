@@ -45,6 +45,7 @@ from debug_utils import check_for_nans, check_model_parameters
 
 # Import refactored utility modules
 from utils.youtube_s3_dataset import YouTubeS3Dataset
+from utils.multi_rate_dataset import MultiRateDataset
 from utils.s3_utils import save_state_dict_to_s3, upload_file_to_s3
 from utils.augmentation_utils import apply_random_augmentations
 from utils.visualization_utils import save_batch_images_to_png, visualize_dynamic_objects, visualize_motion_maps, visualize_motion_flow_overlay
@@ -767,22 +768,37 @@ def train_model(train_config=None, experiment_tracker=None):
             overwrite=False
         )
         
-        # Create YouTube S3 dataset with optimizations
-        full_dataset = YouTubeS3Dataset(
-            bucket_name=cfg.DATASET.S3_BUCKET,
-            root_prefix=cfg.DATASET.get('YOUTUBE_ROOT_PREFIX', 'openDV-YouTube/full_images/'),
-            m=cfg.MODEL.M,
-            n=cfg.MODEL.N,
-            transform=None,
-            region_name=cfg.DATASET.get('S3_REGION', 'us-phoenix-1'),
-            cache_dir=cfg.DATASET.get('YOUTUBE_CACHE_DIR', './youtube_cache'),
-            refresh_cache=cfg.DATASET.get('YOUTUBE_REFRESH_CACHE', False),
-            min_sequence_length=cfg.DATASET.get('YOUTUBE_MIN_SEQUENCE_LENGTH', 50),
-            skip_frames=cfg.DATASET.get('YOUTUBE_SKIP_FRAMES', 300),
-            max_workers=cfg.DATASET.get('YOUTUBE_MAX_WORKERS', 8),
-            verbose=True,
-            frame_sampling_rate=cfg.DATASET.get('FRAME_SAMPLING_RATE', 1)  # 1=10Hz, 5=2Hz
-        )
+        # Create multi-rate YouTube S3 dataset that randomly samples different frame rates
+        dataset_kwargs = {
+            'bucket_name': cfg.DATASET.S3_BUCKET,
+            'root_prefix': cfg.DATASET.get('YOUTUBE_ROOT_PREFIX', 'openDV-YouTube/full_images/'),
+            'm': cfg.MODEL.M,
+            'n': cfg.MODEL.N,
+            'transform': None,
+            'region_name': cfg.DATASET.get('S3_REGION', 'us-phoenix-1'),
+            'cache_dir': cfg.DATASET.get('YOUTUBE_CACHE_DIR', './youtube_cache'),
+            'refresh_cache': cfg.DATASET.get('YOUTUBE_REFRESH_CACHE', False),
+            'min_sequence_length': cfg.DATASET.get('YOUTUBE_MIN_SEQUENCE_LENGTH', 50),
+            'skip_frames': cfg.DATASET.get('YOUTUBE_SKIP_FRAMES', 300),
+            'max_workers': cfg.DATASET.get('YOUTUBE_MAX_WORKERS', 8),
+            'verbose': True
+        }
+        
+        # Use multi-rate dataset if enabled
+        if cfg.DATASET.get('USE_MULTI_RATE_TRAINING', True):
+            frame_rates = cfg.DATASET.get('MULTI_RATE_FRAME_RATES', [1, 2, 5])
+            rate_weights = cfg.DATASET.get('MULTI_RATE_WEIGHTS', None)  # None = uniform weights
+            
+            full_dataset = MultiRateDataset(
+                base_dataset_class=YouTubeS3Dataset,
+                dataset_kwargs=dataset_kwargs,
+                frame_rates=frame_rates,
+                rate_weights=rate_weights
+            )
+        else:
+            # Single rate dataset (backward compatibility)
+            dataset_kwargs['frame_sampling_rate'] = cfg.DATASET.get('FRAME_SAMPLING_RATE', 1)
+            full_dataset = YouTubeS3Dataset(**dataset_kwargs)
         
         print(f"✅ YouTube dataset loaded: {len(full_dataset):,} training samples")
         
@@ -1671,7 +1687,6 @@ def train_model(train_config=None, experiment_tracker=None):
                         )
                 
                 pi3_loss = (cfg.LOSS.PC_LOSS_WEIGHT * point_map_loss) + (cfg.LOSS.POSE_LOSS_WEIGHT * camera_pose_loss) + (cfg.LOSS.CONF_LOSS_WEIGHT * conf_loss) + (cfg.LOSS.NORMAL_LOSS_WEIGHT * normal_loss) + (cfg.LOSS.SEGMENTATION_LOSS_WEIGHT * segmentation_loss) + (cfg.LOSS.MOTION_LOSS_WEIGHT * motion_loss) + (cfg.LOSS.FLOW_LOSS_WEIGHT * flow_loss) + (cfg.LOSS.FROZEN_DECODER_SUPERVISION_WEIGHT * frozen_decoder_loss)
-                
                 # Backward pass for Pi3 loss (optimize main model only)
                 accelerator.backward(pi3_loss)
                 
@@ -1703,9 +1718,9 @@ def train_model(train_config=None, experiment_tracker=None):
                                 
                             if 'autonomy_features' in cfg.MODEL.DISTILLED_VIT.DISTILL_TOKENS:
                                 # Mean pool frame M and frame M-1  
-                                frame_m_minus_1 = predictions['autonomy_features'][cfg.MODEL.M - 1]  # [S, D]
+                                frame_m_minus_1 = predictions['autonomy_features'][cfg.MODEL.M + 1]  # [S, D]
                                 frame_m = predictions['autonomy_features'][cfg.MODEL.M]  # [S, D]
-                                teacher_features['autonomy_features'] = ((frame_m + frame_m_minus_1) / 2.0).unsqueeze(0)  # [1, S, D]
+                                teacher_features['autonomy_features'] = ((frame_m_minus_1- frame_m)).unsqueeze(0)  # [1, S, D]
                         
                         # Compute distillation loss
                         if len(teacher_features) > 0:

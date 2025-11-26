@@ -39,7 +39,13 @@ def load_ppgeo_resnet_encoder(checkpoint_path: str, resnet_layers: int = 152, de
     )
     
     # Load model state dict
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    
+    if missing_keys:
+        print(f"⚠️  Missing keys in full model: {missing_keys[:3]}{'...' if len(missing_keys) > 3 else ''}")
+    if unexpected_keys:
+        print(f"⚠️  Unexpected keys in full model: {unexpected_keys[:3]}{'...' if len(unexpected_keys) > 3 else ''}")
+    
     model.to(device)
     model.eval()
     
@@ -105,10 +111,10 @@ def load_standalone_resnet_encoder(checkpoint_path: str, resnet_layers: int = 15
     encoder_state = {}
     for key, value in full_model_state.items():
         if key.startswith('encoder.'):
-            new_key = key.replace('encoder.', '')  # Remove 'encoder.' prefix
-            encoder_state[new_key] = value
+            encoder_state[key] = value
     
     # Load encoder weights
+    import ipdb; ipdb.set_trace()
     missing_keys, unexpected_keys = encoder.load_state_dict(encoder_state, strict=False)
     
     if missing_keys:

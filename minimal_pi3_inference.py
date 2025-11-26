@@ -25,7 +25,17 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pi3"))
 
 from pi3.models.pi3 import Pi3
 
-MODEL_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/checkpoints/best_model.pt"
+# MODEL_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/matt-pi3-ff-10hz-3-3-gt4xkt_c28daec24cc_02000000_0_best_model.pt"
+# MODEL_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/matt-pi3-ff-10hz-3-3-gt4xkt_c28daec24cc_02000000_0_best_model.pt"
+
+# MODEL_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/matt-pi3-seg-ff-final-3e9in2_c28daec24cc_02000000_0_best_model.pt"
+MODEL_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/matt-pi3-ff-5hz-seg-giannis-9sn7xm_c28daec24cc_02000000_0_best_model.pt"
+MODEL_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/matt-pi3-final-stage1-5hz-prayer-26vw0a_c28daec24cc_02000000_0_best_model.pt"
+
+
+
+# MODEL_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/matt-pi3-ff-final-1-a9ncin_c28daec24cc_02000000_0_best_model.pt"
+
 
 def load_checkpoint(checkpoint_path, cfg, device='cuda'):
     """
@@ -97,6 +107,7 @@ def load_autoregressive_pi3():
     # Create model
     cfg = get_cfg_defaults()
     cfg = update_config(cfg)
+
     model, checkpoint = load_checkpoint(MODEL_CHECKPOINT, cfg, device)
 
     return model, checkpoint
@@ -151,9 +162,9 @@ def run_pi3_inference(model, video_tensor, is_autoregressive=False):
     # Add batch dimension [1, T, C, H, W]
     video_batch = video_tensor.unsqueeze(0).to(device)
 
-    # if is autoregressive, give only 4 frame
+    # if is autoregressive, give only 3 frames for 3 frame output
     if is_autoregressive:
-        video_batch = video_batch[:, :4, ...]
+        video_batch = video_batch[:, :3, ...]
     
     print(f"🔮 Running Pi3 inference on {video_tensor.shape[0]} frames...")
     
@@ -377,7 +388,6 @@ def main():
     torch.cuda.empty_cache()
 
     # let us run the (our) autoregressive pi3 model
-    import ipdb; ipdb.set_trace()
     model, checkpoint = load_autoregressive_pi3()
     print("🔮 Running Autoregressive Pi3 inference...")
 

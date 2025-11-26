@@ -36,6 +36,11 @@ _C.DATASET.YOUTUBE_MAX_WORKERS = 8          # Parallel workers for S3 indexing
 _C.DATASET.MAX_SAMPLES = -1                 # Limit dataset size (-1 for all samples)
 _C.DATASET.FRAME_SAMPLING_RATE = 1         # Sample every Nth frame (1=10Hz, 5=2Hz) from source 10Hz videos
 
+# Multi-rate training configuration
+_C.DATASET.USE_MULTI_RATE_TRAINING = True   # Enable training with multiple frame rates
+_C.DATASET.MULTI_RATE_FRAME_RATES = [1, 2, 5]  # Train on 10Hz, 5Hz, and 2Hz data
+_C.DATASET.MULTI_RATE_WEIGHTS = None       # Sampling weights for each rate (None = uniform)
+
 _C.DATASET.BATCH_SIZE = 20                  # Batch size for training
 _C.DATASET.VAL_SPLIT = 0.1                 # Fraction of data to use for validation
 
@@ -74,7 +79,7 @@ _C.MODEL.DETR_NUM_HEADS = 8                # Number of attention heads in DETR d
 _C.MODEL.DETR_NUM_LAYERS = 6               # Number of DETR decoder layers
 _C.MODEL.USE_MOTION_HEAD = False           # Enable motion head
 _C.MODEL.USE_FLOW_HEAD = False             # Enable optical flow head
-_C.MODEL.USE_SEGMENTATION_HEAD = True       # Enable segmentation head
+_C.MODEL.USE_SEGMENTATION_HEAD = False       # Enable segmentation head
 _C.MODEL.SEGMENTATION_MODEL = "gsam2"   # Segmentation model: "gsam2", "segformer", "deeplabv3"
 _C.MODEL.SEGMENTATION_NUM_CLASSES = 7       # Number of segmentation classes (7 for Cityscapes, 6 for GSAM2)
 _C.MODEL.FREEZE_DECODERS = False            # Freeze point, conf, and camera decoders/heads
@@ -98,7 +103,10 @@ _C.PPGEO.MAX_DEPTH = 100.0                 # Maximum depth value
 _C.PPGEO.ENCODER = "dinov3"                 # Encoder type: "dinov3", "dinov2", "vit", or "resnet"
 _C.PPGEO.RESNET_LAYERS = 18                 # Number of ResNet layers (18, 34, 50, 101, 152)
 _C.STAGE1_CHECKPOINT = ""                   # Path to Stage 1 checkpoint for Stage 2 training
+_C.MOTIONNET_CHECKPOINT = ""                # Path to pretrained MotionNet checkpoint (e.g., ResNet weights)
 _C.DEPTHANYTHING_CHECKPOINT = "/home/matthew_strong/Desktop/autonomy-wild/Depth-Anything-V2/metric_depth/checkpoints/depth_anything_v2_metric_vkitti_vitl.pth"  # Pre-trained DepthAnything checkpoint
+_C.DEPTH_CHECKPOINT = ""                    # Path to PPGeo pretrained depth checkpoint (ResNet)
+_C.POSE_CHECKPOINT = ""                     # Path to PPGeo pretrained pose checkpoint (ResNet)
 
 # MapAnything HuggingFace configuration
 _C.MODEL.MAPANYTHING.HF_MODEL_NAME = "facebook/map-anything"  # HuggingFace model name
